@@ -79,13 +79,13 @@ func deserializeInstruction(data []byte) (*TransactionInstructionBase, int, erro
 
 	ixData := make([]byte, dataLen)
 	copy(ixData, data[offset:offset+int(dataLen)])
-	ixDataEncoded := base64.StdEncoding.EncodeToString(ixData)
+	// ixDataEncoded := base64.StdEncoding.EncodeToString(ixData)
 	offset += int(dataLen)
 
 	ix := &TransactionInstructionBase{
 		ProgramIdIndex:  programIdIndex,
 		AccountsIndexes: accountsIndexes,
-		Data:            ixDataEncoded,
+		Data:            ixData,
 	}
 	return ix, offset, nil
 }

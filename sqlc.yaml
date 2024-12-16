@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema:
+      - "db/migrations/00.up.sql"
+    queries: "db/queries.sql"
+    gen:
+      go:
+        package: "dbgen"
+        out: "pkg/dbgen"
+        emit_db_tags: true
+        emit_result_struct_pointers: true
+        emit_params_struct_pointers: true
+        emit_json_tags: true

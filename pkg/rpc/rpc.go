@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 type Encoding string
@@ -41,7 +42,9 @@ func (r *Response) formatError() error {
 var reqId atomic.Uint64
 
 type Client struct {
-	url string
+	url     string
+	timeout *time.Duration
+	limiter *time.Timer
 }
 
 func NewClient(url string) *Client {
@@ -50,7 +53,21 @@ func NewClient(url string) *Client {
 	}
 }
 
+func NewClientWithTimer(url string, timeout time.Duration) *Client {
+	return &Client{
+		url:     url,
+		timeout: &timeout,
+	}
+}
+
 func (c *Client) execute(method string, params any, out interface{}) error {
+	if c.limiter != nil {
+		<-c.limiter.C
+	}
+	if c.timeout != nil {
+		c.limiter = time.NewTimer(*c.timeout)
+	}
+
 	rId := reqId.Add(1)
 	body := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -135,7 +152,7 @@ func (c *Client) GetSignaturesForAddress(address string, config *GetSignaturesFo
 type TransactionInstructionBase struct {
 	ProgramIdIndex  uint8
 	AccountsIndexes []uint8 `json:"accounts"`
-	Data            string
+	Data            []byte
 }
 
 type TransactionInnerInstructions struct {
@@ -233,9 +250,9 @@ type ResponseGetTransaction struct {
 	Result *TransactionResult `json:"result,omitempty"`
 }
 
-func (c *Client) GetTransaction(signature string) (*ParsedTransactionResult, error) {
+func (c *Client) GetTransaction(signature string, commitment Commitment) (*ParsedTransactionResult, error) {
 	config := map[string]interface{}{
-		"commitment":                     CommitmentConfirmed,
+		"commitment":                     commitment,
 		"maxSupportedTransactionVersion": 0,
 		"encoding":                       EncodingBase64,
 	}

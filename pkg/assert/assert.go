@@ -2,7 +2,6 @@ package assert
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"runtime"
 	"strings"
@@ -32,24 +31,21 @@ func getStackTrace() string {
 
 func NoErr(err error, msg string, args ...any) {
 	if err != nil {
-		if len(args) > 0 {
-			slog.Error(fmt.Sprintf("NoErr assertion failed: %s", msg), args...)
-		} else {
-			fmt.Printf("NoErr assertion failed: %s\n", msg)
-		}
-		fmt.Printf("\nStacktrace: %s", getStackTrace())
+		fmt.Printf("NoErr assertion failed: %s\n\nStacktrace: %s", msg, getStackTrace())
 		os.Exit(1)
 	}
 }
 
 func True(cond bool, msg string, args ...any) {
 	if !cond {
-		if len(args) > 0 {
-			slog.Error(fmt.Sprintf("True assertion failed: %s", msg), args...)
-		} else {
-			fmt.Printf("True assertion failed: %s\n", msg)
-		}
-		fmt.Printf("\nStacktrace: %s", getStackTrace())
+		fmt.Printf("True assertion failed: %s\n\nStacktrace: %s", msg, getStackTrace())
+		os.Exit(1)
+	}
+}
+
+func NoEmptyStr(s string, msg string) {
+	if s == "" {
+		fmt.Printf("NoEmptyStr assertion failed: %s\n\nStacktrace: %s", msg, getStackTrace())
 		os.Exit(1)
 	}
 }
