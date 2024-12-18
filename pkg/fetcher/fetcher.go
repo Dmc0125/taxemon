@@ -12,6 +12,8 @@ import (
 	"taxemon/pkg/assert"
 	"taxemon/pkg/dbgen"
 	"taxemon/pkg/rpc"
+
+	"golang.org/x/sync/errgroup"
 )
 
 func forceRpcRequest[T any](f func() (T, error), limit uint8) (T, error) {
@@ -28,20 +30,41 @@ func forceRpcRequest[T any](f func() (T, error), limit uint8) (T, error) {
 	return res, fmt.Errorf("unable to execute rpc request")
 }
 
+type insertableInstructionBase struct {
+	program_id_index int64
+	accounts_idxs    string
+	data             []byte
+}
+
+type insertableInstruction struct {
+	*insertableInstructionBase
+	innerInstructions []*insertableInstructionBase
+}
+
 type InsertableTransaction struct {
 	signature string
 	timestamp int64
 	slot      int64
 	err       bool
 	errMsg    string
+
+	logs      [][]byte
+	addresses []string
+
+	ixs []*insertableInstruction
 }
 
-func newInsertableTransaction(tx *rpc.ParsedTransactionResult) *InsertableTransaction {
+func newInsertableTransaction(tx *rpc.ParsedTransactionResult) (*InsertableTransaction, error) {
 	itx := &InsertableTransaction{
 		signature: tx.Transaction.Signatures[0],
 		timestamp: tx.BlockTime,
 		slot:      int64(tx.Slot),
 		err:       tx.Meta.Err == nil,
+
+		logs:      make([][]byte, 0),
+		addresses: make([]string, 0),
+
+		ixs: make([]*insertableInstruction, 0),
 	}
 	if itx.err {
 		errMsg, err := json.Marshal(tx.Meta.Err)
@@ -49,94 +72,15 @@ func newInsertableTransaction(tx *rpc.ParsedTransactionResult) *InsertableTransa
 			itx.errMsg = string(errMsg)
 		}
 	}
-	return itx
-}
 
-type insertedTransaction struct {
-	Signature string
-	Id        int64
-}
-
-func insertTransactions(db dbgen.DBTX, txs []*InsertableTransaction) ([]*insertedTransaction, error) {
-	placeholders := make([]string, len(txs))
-	args := []interface{}{}
-
-	for _, tx := range txs {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?)")
-		args = append(args, tx.signature, tx.timestamp, tx.slot, tx.err, tx.errMsg)
-	}
-
-	q := strings.Builder{}
-	q.WriteString("INSERT INTO transaction (signature, timestamp, slot, err, err_msg) VALUES ")
-	q.WriteString(strings.Join(placeholders, ","))
-	q.WriteString(" ON CONFLICT (signature) DO NOTHING RETURNING id;")
-
-	rows, err := db.QueryContext(context.Background(), q.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	insertedTxs := make([]*insertedTransaction, 0)
-	for rows.Next() {
-		t := new(insertedTransaction)
-		if err = rows.Scan(t); err != nil {
-			return nil, err
-		}
-		insertedTxs = append(insertedTxs, t)
-	}
-
-	return insertedTxs, nil
-}
-
-type insertableTransactionAccounts struct {
-	signature string
-	addresses []string
-}
-
-func newInsertableTransactionAccounts(tx *rpc.ParsedTransactionResult) *insertableTransactionAccounts {
-	addresses := slices.AppendSeq(
-		slices.Clone(tx.Transaction.Message.AccountKeys),
-		slices.Values(tx.Meta.LoadedAddresses.Readonly),
+	itx.addresses = slices.AppendSeq(
+		slices.AppendSeq(
+			slices.Clone(tx.Transaction.Message.AccountKeys),
+			slices.Values(tx.Meta.LoadedAddresses.Readonly),
+		),
+		slices.Values(tx.Meta.LoadedAddresses.Writable),
 	)
-	addresses = slices.AppendSeq(addresses, slices.Values(tx.Meta.LoadedAddresses.Writable))
-	return &insertableTransactionAccounts{
-		signature: tx.Transaction.Signatures[0],
-		addresses: addresses,
-	}
-}
 
-func insertTransactionAccounts(db dbgen.DBTX, accounts []*insertableTransactionAccounts, insertedTransactions []*insertedTransaction) error {
-	placeholders := make([]string, 0)
-	args := make([]interface{}, 0)
-	for _, a := range accounts {
-		transactionIdx := slices.IndexFunc(insertedTransactions, func(tx *insertedTransaction) bool {
-			return tx.Signature == a.signature
-		})
-		if transactionIdx == -1 {
-			return fmt.Errorf("unable to find transaction in inserted transactions")
-		}
-		txId := insertedTransactions[transactionIdx].Id
-		for idx, address := range a.addresses {
-			placeholders = append(placeholders, "(?, ?, ?)")
-			args = append(args, txId, address, idx)
-		}
-	}
-
-	q := strings.Builder{}
-	q.WriteString("INSERT INTO transaction_account (transaction_id, address, idx) VALUES ")
-	q.WriteString(strings.Join(placeholders, ","))
-	q.WriteString(";")
-
-	_, err := db.ExecContext(context.Background(), q.String(), args)
-	return err
-}
-
-type insertableTransactionLogs struct {
-	signature string
-	logs      [][]byte
-}
-
-func newInsertableTransactionLogs(tx *rpc.ParsedTransactionResult) *insertableTransactionLogs {
-	parsedMessages := make([][]byte, 0)
 	for _, msg := range tx.Meta.LogMessages {
 		var startIdx int
 		if strings.HasPrefix(msg, "Program log:") {
@@ -153,67 +97,16 @@ func newInsertableTransactionLogs(tx *rpc.ParsedTransactionResult) *insertableTr
 		}
 
 		if bytes, err := base64.StdEncoding.DecodeString(dataEncoded); err == nil {
-			parsedMessages = append(parsedMessages, bytes)
+			itx.logs = append(itx.logs, bytes)
 		}
 	}
-
-	return &insertableTransactionLogs{
-		signature: tx.Transaction.Signatures[0],
-		logs:      parsedMessages,
-	}
-}
-
-func insertTransactionLogs(db dbgen.DBTX, logs []*insertableTransactionLogs, insertedTransactions []*insertedTransaction) error {
-	placeholders := make([]string, 0)
-	args := make([]interface{}, 0)
-	for _, l := range logs {
-		transactionIdx := slices.IndexFunc(insertedTransactions, func(tx *insertedTransaction) bool {
-			return tx.Signature == l.signature
-		})
-		if transactionIdx == -1 {
-			return fmt.Errorf("unable to find transaction in inserted transactions")
-		}
-		txId := insertedTransactions[transactionIdx].Id
-		for idx, log := range l.logs {
-			placeholders = append(placeholders, "(?, ?, ?)")
-			args = append(args, txId, log, idx)
-		}
-	}
-
-	q := strings.Builder{}
-	q.WriteString("INSERT INTO transaction_log (transaction_id, log, idx) VALUES ")
-	q.WriteString(strings.Join(placeholders, ","))
-	q.WriteString(";")
-
-	_, err := db.ExecContext(context.Background(), q.String(), args)
-	return err
-}
-
-type insertableInstructionBase struct {
-	program_id_index int64
-	accounts_idxs    string
-	data             []byte
-}
-
-type insertableInstruction struct {
-	*insertableInstructionBase
-	innerInstructions []*insertableInstructionBase
-}
-
-type insertableInstructions struct {
-	signature    string
-	instructions []*insertableInstruction
-}
-
-func newInsertableInstructions(tx *rpc.ParsedTransactionResult) (*insertableInstructions, error) {
-	instructions := make([]*insertableInstruction, 0)
 
 	for _, ix := range tx.Transaction.Message.Instructions {
 		accountsIdxs, err := json.Marshal(ix.AccountsIndexes)
 		if err != nil {
 			return nil, err
 		}
-		instructions = append(instructions, &insertableInstruction{
+		itx.ixs = append(itx.ixs, &insertableInstruction{
 			insertableInstructionBase: &insertableInstructionBase{
 				program_id_index: int64(ix.ProgramIdIndex),
 				accounts_idxs:    string(accountsIdxs),
@@ -223,7 +116,7 @@ func newInsertableInstructions(tx *rpc.ParsedTransactionResult) (*insertableInst
 		})
 	}
 	for _, innerIxs := range tx.Meta.InnerInstructions {
-		ix := instructions[int(innerIxs.IxIndex)]
+		ix := itx.ixs[int(innerIxs.IxIndex)]
 		for _, innerIx := range innerIxs.Instructions {
 			accountsIds, err := json.Marshal(innerIx.Data)
 			if err != nil {
@@ -237,53 +130,148 @@ func newInsertableInstructions(tx *rpc.ParsedTransactionResult) (*insertableInst
 		}
 	}
 
-	return &insertableInstructions{
-		signature:    tx.Transaction.Signatures[0],
-		instructions: instructions,
-	}, nil
+	return itx, nil
 }
 
-func insertInstructions(db dbgen.DBTX, ixs []*insertableInstructions, insertedTransactions []*insertedTransaction) error {
-	ixPlaceholders := make([]string, 0)
-	ixArgs := make([]interface{}, 0)
-	iixPlaceholders := make([]string, 0)
-	iixArgs := make([]interface{}, 0)
+type preparedQuery struct {
+	queryPrefix  string
+	querySuffix  string
+	placeholders []string
+	args         []interface{}
+}
 
-	for _, _ix := range ixs {
-		txId := slices.IndexFunc(insertedTransactions, func(tx *insertedTransaction) bool {
-			return tx.Signature == _ix.signature
-		})
-		if txId == -1 {
-			return fmt.Errorf("unable to find inserted transaction")
-		}
-
-		for idx, ix := range _ix.instructions {
-			ixPlaceholders = append(ixPlaceholders, "(?, ?, ?, ?, ?)")
-			ixArgs = append(ixArgs, txId, idx, ix.program_id_index, ix.accounts_idxs, ix.data)
-
-			for innerIxIdx, iix := range ix.innerInstructions {
-				iixPlaceholders = append(iixPlaceholders, "(?, ?, ?, ?, ?, ?)")
-				iixArgs = append(iixArgs, txId, idx, innerIxIdx, iix.program_id_index, iix.accounts_idxs, iix.data)
-			}
-		}
+func newPreparedQuery(prefix, suffix string) *preparedQuery {
+	return &preparedQuery{
+		queryPrefix:  prefix,
+		querySuffix:  suffix,
+		placeholders: make([]string, 0),
+		args:         make([]interface{}, 0),
 	}
+}
 
-	q := strings.Builder{}
-	q.WriteString("INSERT INTO instruction (transaction_id, idx, program_id_idx, accounts_idxs, data) VALUES ")
-	q.WriteString(strings.Join(ixPlaceholders, ","))
-	q.WriteString(";")
+func (pq *preparedQuery) string() string {
+	return fmt.Sprintf(
+		"%s %s %s;",
+		pq.queryPrefix,
+		strings.Join(pq.placeholders, ","),
+		pq.querySuffix,
+	)
+}
 
-	_, err := db.ExecContext(context.Background(), q.String(), ixArgs...)
+func prepareInsertTransactionsQuery(txs []*InsertableTransaction) *preparedQuery {
+	pq := newPreparedQuery(
+		"INSERT INTO transaction (signature, timestamp, slot, err, err_msg) VALUES",
+		"ON CONFLICT (signature) DO NOTHING RETURNING id;",
+	)
+	for _, tx := range txs {
+		pq.placeholders = append(pq.placeholders, "(?, ?, ?, ?, ?)")
+		pq.args = append(pq.args, tx.signature, tx.timestamp, tx.slot, tx.err, tx.errMsg)
+	}
+	return pq
+}
+
+type insertedTransaction struct {
+	Signature string
+	Id        int64
+}
+
+func insertTransactions(db *sql.DB, txs []*InsertableTransaction) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	txsPreparedQuery := prepareInsertTransactionsQuery(txs)
+	rows, err := tx.Query(txsPreparedQuery.string(), txsPreparedQuery.args...)
 	if err != nil {
 		return err
 	}
 
-	q.Reset()
-	q.WriteString("INSERT INTO inner_instruction (transaction_id, ix_idx, idx, program_id_idx, accounts_idxs, data) VALUES ")
-	q.WriteString(strings.Join(iixPlaceholders, ","))
-	q.WriteString(";")
+	insertedTxs := make([]*insertedTransaction, 0)
+	for rows.Next() {
+		t := new(insertedTransaction)
+		if err = rows.Scan(t); err != nil {
+			return err
+		}
+		insertedTxs = append(insertedTxs, t)
+	}
 
-	_, err = db.ExecContext(context.Background(), q.String(), iixArgs...)
+	accountsPreparedQuery := newPreparedQuery(
+		"INSERT INTO transaction_accounts (transaction_id, address, idx) VALUES",
+		"",
+	)
+	logsPreparedQuery := newPreparedQuery(
+		"INSERT INTO transaction_logs (transaction_id, log, idx) VALUES",
+		"",
+	)
+	ixsPreparedQuery := newPreparedQuery(
+		"INSERT INTO instruction (transaction_id, idx, program_id_idx, accounts_idxs, data) VALUES",
+		"",
+	)
+	innerIxsPreparedQuery := newPreparedQuery(
+		"INSERT INTO inner_instruction (transaction_id, ix_idx, idx, program_id_idx, accounts_idxs, data) VALUES",
+		"",
+	)
+
+	for _, tx := range txs {
+		txIdIdx := slices.IndexFunc(insertedTxs, func(itx *insertedTransaction) bool {
+			return itx.Signature == tx.signature
+		})
+		if txIdIdx == -1 {
+			return fmt.Errorf("unable to find inserted tx")
+		}
+		txId := insertedTxs[txIdIdx].Id
+
+		for accountIdx, address := range tx.addresses {
+			accountsPreparedQuery.placeholders = append(accountsPreparedQuery.placeholders, "(?, ?, ?)")
+			accountsPreparedQuery.args = append(accountsPreparedQuery.args, txId, address, accountIdx)
+		}
+		for logIdx, log := range tx.logs {
+			logsPreparedQuery.placeholders = append(logsPreparedQuery.placeholders, "(?, ?, ?)")
+			logsPreparedQuery.args = append(logsPreparedQuery.args, txId, log, logIdx)
+		}
+		for ixIdx, ix := range tx.ixs {
+			ixsPreparedQuery.placeholders = append(ixsPreparedQuery.placeholders, "(?, ?, ?, ?, ?)")
+			ixsPreparedQuery.args = append(ixsPreparedQuery.args, txId, ixIdx, ix.program_id_index, ix.accounts_idxs, ix.data)
+
+			for innerIxIdx, innerIx := range ix.innerInstructions {
+				innerIxsPreparedQuery.placeholders = append(innerIxsPreparedQuery.placeholders, "(?, ?, ?, ?, ?, ?)")
+				innerIxsPreparedQuery.args = append(
+					innerIxsPreparedQuery.args,
+					txId,
+					ixIdx,
+					innerIxIdx,
+					innerIx.program_id_index,
+					innerIx.accounts_idxs,
+					innerIx.data,
+				)
+			}
+		}
+	}
+
+	var eg errgroup.Group
+	eg.TryGo(func() error {
+		_, err := tx.Exec(accountsPreparedQuery.string(), accountsPreparedQuery.args...)
+		return err
+	})
+	eg.TryGo(func() error {
+		_, err := tx.Exec(logsPreparedQuery.string(), logsPreparedQuery.args...)
+		return err
+	})
+	eg.TryGo(func() error {
+		_, err := tx.Exec(ixsPreparedQuery.string(), ixsPreparedQuery.args...)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(innerIxsPreparedQuery.string(), innerIxsPreparedQuery.args...)
+		return err
+	})
+	if err = eg.Wait(); err != nil {
+		return err
+	}
+
+	err = tx.Commit()
 	return err
 }
 
@@ -315,9 +303,6 @@ func SyncWallet(
 		// parse associated accounts for saved transactions
 
 		insertableTransactions := make([]*InsertableTransaction, 0)
-		insertableTransactionsAccounts := make([]*insertableTransactionAccounts, 0)
-		insertableTransactionLogs := make([]*insertableTransactionLogs, 0)
-		insertableInstructions := make([]*insertableInstructions, 0)
 
 		for _, sr := range signaturesResults {
 			if txIdx := slices.IndexFunc(savedTransactions, func(tx *dbgen.VTransaction) bool {
@@ -332,23 +317,12 @@ func SyncWallet(
 			}, 5)
 			assert.NoErr(err, "unable to get transaction")
 
-			insertableTransactions = append(insertableTransactions, newInsertableTransaction(tx))
-			insertableTransactionsAccounts = append(insertableTransactionsAccounts, newInsertableTransactionAccounts(tx))
-			insertableTransactionLogs = append(insertableTransactionLogs, newInsertableTransactionLogs(tx))
-			iixs, err := newInsertableInstructions(tx)
-			assert.NoErr(err, "unable to create insertable instructions")
-			insertableInstructions = append(insertableInstructions, iixs)
+			insertableTx, err := newInsertableTransaction(tx)
+			assert.NoErr(err, "unable to create insertable tx")
+			insertableTransactions = append(insertableTransactions, insertableTx)
 		}
 
-		tx, err := db.Begin()
-		insertedTxs, err := insertTransactions(tx, insertableTransactions)
+		err = insertTransactions(db, insertableTransactions)
 		assert.NoErr(err, "unable to insert transactions")
-
-		err = insertTransactionAccounts(tx, insertableTransactionsAccounts, insertedTxs)
-		assert.NoErr(err, "unable to insert transactions accounts")
-		err = insertTransactionLogs(tx, insertableTransactionLogs, insertedTxs)
-		assert.NoErr(err, "unable to insert transactions logs")
-		err = insertInstructions(tx, insertableInstructions, insertedTxs)
-		assert.NoErr(err, "unable to insert transactions instructions")
 	}
 }

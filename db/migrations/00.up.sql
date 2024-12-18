@@ -53,7 +53,7 @@ CREATE TABLE inner_instruction (
     --
     PRIMARY KEY (transaction_id, ix_idx, idx),
     FOREIGN KEY (transaction_id) REFERENCES transaction (id) ON DELETE CASCADE,
-    FOREIGN KEY (ix_idx) REFERENCES instruction (id) ON DELETE CASCADE
+    FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (transaction_id, id) ON DELETE CASCADE
 );
 
 CREATE VIEW v_inner_instruction AS

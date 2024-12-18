@@ -5,6 +5,7 @@ go 1.23.1
 require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mr-tron/base58 v1.2.0
+	golang.org/x/sync v0.10.0
 	modernc.org/sqlite v1.34.2
 )
 
