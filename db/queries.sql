@@ -2,6 +2,6 @@
 SELECT
     *
 FROM
-    v_transaction tx
+    v_transaction t
 WHERE
-    tx.signature IN (sqlc.slice ('signatures'));
+    t.signature in (sqlc.slice ('signatures'))

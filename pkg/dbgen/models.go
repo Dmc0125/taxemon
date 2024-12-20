@@ -8,21 +8,28 @@ import (
 	"database/sql"
 )
 
+type Event struct {
+	TransactionID int64  `db:"transaction_id" json:"transaction_id"`
+	IxIdx         int64  `db:"ix_idx" json:"ix_idx"`
+	Type          int64  `db:"type" json:"type"`
+	Data          []byte `db:"data" json:"data"`
+}
+
 type InnerInstruction struct {
-	TransactionID  int64          `db:"transaction_id" json:"transaction_id"`
-	IxIdx          int64          `db:"ix_idx" json:"ix_idx"`
-	Idx            int64          `db:"idx" json:"idx"`
-	ProgramIDIndex int64          `db:"program_id_index" json:"program_id_index"`
-	AccountsIds    sql.NullString `db:"accounts_ids" json:"accounts_ids"`
-	Data           []byte         `db:"data" json:"data"`
+	TransactionID int64  `db:"transaction_id" json:"transaction_id"`
+	IxIdx         int64  `db:"ix_idx" json:"ix_idx"`
+	Idx           int64  `db:"idx" json:"idx"`
+	ProgramIDIdx  int64  `db:"program_id_idx" json:"program_id_idx"`
+	AccountsIdxs  string `db:"accounts_idxs" json:"accounts_idxs"`
+	Data          string `db:"data" json:"data"`
 }
 
 type Instruction struct {
-	TransactionID  int64          `db:"transaction_id" json:"transaction_id"`
-	Idx            int64          `db:"idx" json:"idx"`
-	ProgramIDIndex int64          `db:"program_id_index" json:"program_id_index"`
-	AccountsIds    sql.NullString `db:"accounts_ids" json:"accounts_ids"`
-	Data           []byte         `db:"data" json:"data"`
+	TransactionID int64  `db:"transaction_id" json:"transaction_id"`
+	Idx           int64  `db:"idx" json:"idx"`
+	ProgramIDIdx  int64  `db:"program_id_idx" json:"program_id_idx"`
+	AccountsIdxs  string `db:"accounts_idxs" json:"accounts_idxs"`
+	Data          string `db:"data" json:"data"`
 }
 
 type Transaction struct {
@@ -48,23 +55,31 @@ type TransactionLog struct {
 }
 
 type VInnerInstruction struct {
-	Address     string         `db:"address" json:"address"`
-	AccountsIds sql.NullString `db:"accounts_ids" json:"accounts_ids"`
-	Data        []byte         `db:"data" json:"data"`
+	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
+	IxIdx         int64       `db:"ix_idx" json:"ix_idx"`
+	Iixs          interface{} `db:"iixs" json:"iixs"`
 }
 
 type VInstruction struct {
-	Address           string         `db:"address" json:"address"`
-	TransactionID     int64          `db:"transaction_id" json:"transaction_id"`
-	AccountsIds       sql.NullString `db:"accounts_ids" json:"accounts_ids"`
-	Data              []byte         `db:"data" json:"data"`
-	InnerInstructions interface{}    `db:"inner_instructions" json:"inner_instructions"`
+	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
+	Ixs           interface{} `db:"ixs" json:"ixs"`
 }
 
 type VTransaction struct {
-	Signature   string      `db:"signature" json:"signature"`
-	ID          int64       `db:"id" json:"id"`
-	Accounts    interface{} `db:"accounts" json:"accounts"`
-	Logs        interface{} `db:"logs" json:"logs"`
-	Instruction interface{} `db:"instruction" json:"instruction"`
+	Signature         string      `db:"signature" json:"signature"`
+	ID                int64       `db:"id" json:"id"`
+	Accounts          interface{} `db:"accounts" json:"accounts"`
+	Logs              interface{} `db:"logs" json:"logs"`
+	Instructions      interface{} `db:"instructions" json:"instructions"`
+	InnerInstructions interface{} `db:"inner_instructions" json:"inner_instructions"`
+}
+
+type VTransactionAccount struct {
+	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
+	Addresses     interface{} `db:"addresses" json:"addresses"`
+}
+
+type VTransactionLog struct {
+	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
+	Logs          interface{} `db:"logs" json:"logs"`
 }

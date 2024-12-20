@@ -1,14 +1,29 @@
-package parser
+package ixparser
+
+import (
+	"iter"
+)
+
+type Event interface {
+	Type() uint8
+	Data() []byte
+}
 
 type ParsableIxBase interface {
-	programAddress() string
-	accountsAddresses() []string
-	data() []byte
+	ProgramAddress() string
+	AccountsAddresses() []string
+	Data() []byte
 }
 
 type ParsableIx interface {
 	ParsableIxBase
-	innerIxs() []ParsableIx
+	InnerIxs() []ParsableIxBase
+	AddEvent(Event)
+}
+
+type ParsableTx interface {
+	Instructions() iter.Seq2[int, ParsableIx]
+	Logs() iter.Seq2[int, string]
 }
 
 type AssociatedAccount struct {
@@ -16,13 +31,12 @@ type AssociatedAccount struct {
 	Type    int
 }
 
-type EventDataSerialized string
+func ParseTx(tx ParsableTx) []*AssociatedAccount {
+	associatedAccounts := make([]*AssociatedAccount, 0)
 
-type ParsedIx struct {
-	AssociatedAccounts []string
-	EventsSerialized   []EventDataSerialized
-}
+	// for _, ix := range tx.Instructions() {
 
-func ParseIx(ix ParsableIx) *ParsedIx {
-	return nil
+	// }
+
+	return associatedAccounts
 }

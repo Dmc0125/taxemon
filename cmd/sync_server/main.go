@@ -17,8 +17,6 @@ import (
 )
 
 func main() {
-	fmt.Println("aaa")
-
 	err := godotenv.Load()
 	assert.NoErr(err, "unable to read .env")
 
@@ -30,12 +28,11 @@ func main() {
 	assert.NoEmptyStr(rpcUrl, "Missing RPC_URL")
 	assert.NoEmptyStr(dbPath, "Missing DB_PATH")
 
-	fmt.Printf(fmt.Sprintf("file://%s", dbPath))
 	db, err := sql.Open("sqlite", fmt.Sprintf("file://%s", dbPath))
 	assert.NoErr(err, "unable to open db", "dbPath", dbPath)
 	q := dbgen.New(db)
 
-	rpcClient := rpc.NewClientWithTimer(rpcUrl, 200*time.Millisecond)
+	rpcClient := rpc.NewClientWithTimer(rpcUrl, 400*time.Millisecond)
 
 	fetcher.SyncWallet(rpcClient, db, q, "")
 }

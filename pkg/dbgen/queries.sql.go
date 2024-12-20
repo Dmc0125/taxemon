@@ -12,11 +12,11 @@ import (
 
 const fetchTransactions = `-- name: FetchTransactions :many
 SELECT
-    signature, id, accounts, logs, instruction
+    signature, id, accounts, logs, instructions, inner_instructions
 FROM
-    v_transaction tx
+    v_transaction t
 WHERE
-    tx.signature IN (/*SLICE:signatures*/?)
+    t.signature in (/*SLICE:signatures*/?)
 `
 
 func (q *Queries) FetchTransactions(ctx context.Context, signatures []string) ([]*VTransaction, error) {
@@ -43,7 +43,8 @@ func (q *Queries) FetchTransactions(ctx context.Context, signatures []string) ([
 			&i.ID,
 			&i.Accounts,
 			&i.Logs,
-			&i.Instruction,
+			&i.Instructions,
+			&i.InnerInstructions,
 		); err != nil {
 			return nil, err
 		}

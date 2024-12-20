@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+var logger *prettyHandler = nil
+
 const timeFormat = "15:04:05.9999Z07:00"
 const (
 	black        = 30
@@ -57,7 +59,7 @@ func NewPrettyLogger(path string, level int) error {
 		Level: slog.Level(level),
 	})
 
-	handler := &prettyHandler{
+	logger = &prettyHandler{
 		colors:      path == "",
 		out:         out,
 		jsonHandler: jsonHandler,
@@ -65,8 +67,14 @@ func NewPrettyLogger(path string, level int) error {
 		m:           &sync.Mutex{},
 	}
 
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(logger))
 	return nil
+}
+
+func SetOut(out io.Writer) {
+	if logger != nil {
+		logger.out = out
+	}
 }
 
 func (h *prettyHandler) Enabled(ctx context.Context, level slog.Level) bool {

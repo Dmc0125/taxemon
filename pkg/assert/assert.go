@@ -2,9 +2,11 @@ package assert
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"strings"
+	"taxemon/pkg/logger"
 )
 
 func getStackTrace() string {
@@ -31,20 +33,43 @@ func getStackTrace() string {
 
 func NoErr(err error, msg string, args ...any) {
 	if err != nil {
-		fmt.Printf("NoErr assertion failed: %s\n\nStacktrace: %s", msg, getStackTrace())
+		if len(args) > 0 {
+			logger.SetOut(os.Stdout)
+			slog.Error("Assertion failed", args...)
+			fmt.Println()
+		}
+
+		fmt.Printf(
+			"NoErr assertion failed: %s\nErr: %s\n\nStacktrace: %s",
+			msg,
+			err,
+			getStackTrace(),
+		)
 		os.Exit(1)
 	}
 }
 
 func True(cond bool, msg string, args ...any) {
 	if !cond {
+		if len(args) > 0 {
+			logger.SetOut(os.Stdout)
+			slog.Error("Assertion failed", args...)
+			fmt.Println()
+		}
+
 		fmt.Printf("True assertion failed: %s\n\nStacktrace: %s", msg, getStackTrace())
 		os.Exit(1)
 	}
 }
 
-func NoEmptyStr(s string, msg string) {
+func NoEmptyStr(s string, msg string, args ...any) {
 	if s == "" {
+		if len(args) > 0 {
+			logger.SetOut(os.Stdout)
+			slog.Error("Assertion failed", args...)
+			fmt.Println()
+		}
+
 		fmt.Printf("NoEmptyStr assertion failed: %s\n\nStacktrace: %s", msg, getStackTrace())
 		os.Exit(1)
 	}

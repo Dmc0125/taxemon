@@ -4,15 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"log/slog"
 	"slices"
 	"strings"
 	"taxemon/pkg/assert"
 	"taxemon/pkg/dbgen"
+	ixparser "taxemon/pkg/ix_parser"
 	"taxemon/pkg/rpc"
 
+	"github.com/mr-tron/base58"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -27,41 +31,112 @@ func forceRpcRequest[T any](f func() (T, error), limit uint8) (T, error) {
 			return res, nil
 		}
 	}
-	return res, fmt.Errorf("unable to execute rpc request")
+	return res, err
 }
 
 type insertableInstructionBase struct {
-	program_id_index int64
-	accounts_idxs    string
-	data             []byte
+	programIdIdx      int64
+	programAddress    string
+	accountsIndexes   []int
+	accountsAddresses []string
+	data              []byte
+}
+
+func (ix *insertableInstructionBase) ProgramAddress() string {
+	return ix.programAddress
+}
+
+func (ix *insertableInstructionBase) AccountsAddresses() []string {
+	return ix.accountsAddresses
+}
+
+func (ix *insertableInstructionBase) Data() []byte {
+	return ix.data
+}
+
+func newInsertableInstructionBase(
+	ix *rpc.TransactionInstructionBase,
+	txAddresses []string,
+	isInnerIx bool,
+) (*insertableInstructionBase, error) {
+	accountsAddresses := make([]string, len(ix.AccountsIndexes))
+	for i, idx := range ix.AccountsIndexes {
+		if int(idx) >= len(txAddresses) {
+			return nil, fmt.Errorf("invalid account index: %d len: %d", idx, len(ix.AccountsIndexes))
+		}
+		accountsAddresses[i] = txAddresses[idx]
+	}
+
+	var (
+		ixData []byte
+		err    error
+	)
+	if isInnerIx {
+		ixData, err = base58.Decode(ix.Data)
+	} else {
+		ixData, err = base64.StdEncoding.DecodeString(ix.Data)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	iix := insertableInstructionBase{
+		programIdIdx:      int64(ix.ProgramIdIndex),
+		programAddress:    txAddresses[ix.ProgramIdIndex],
+		accountsIndexes:   ix.AccountsIndexes,
+		accountsAddresses: accountsAddresses,
+		data:              ixData,
+	}
+	return &iix, nil
 }
 
 type insertableInstruction struct {
 	*insertableInstructionBase
 	innerInstructions []*insertableInstructionBase
+	events            []ixparser.Event
 }
 
-type InsertableTransaction struct {
+func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
+	// compiler check if insertableInstructionBase implements ixparser.ParsableIxBase
+	var _ ixparser.ParsableIxBase = (*insertableInstructionBase)(nil)
+	return any(ix.innerInstructions).([]ixparser.ParsableIxBase)
+}
+
+func (ix *insertableInstruction) AddEvent(event ixparser.Event) {
+	ix.events = append(ix.events, event)
+}
+
+type insertableTransaction struct {
 	signature string
 	timestamp int64
 	slot      int64
 	err       bool
 	errMsg    string
 
-	logs      [][]byte
+	logs      []string
 	addresses []string
 
 	ixs []*insertableInstruction
 }
 
-func newInsertableTransaction(tx *rpc.ParsedTransactionResult) (*InsertableTransaction, error) {
-	itx := &InsertableTransaction{
+func (tx *insertableTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
+	// compiler check if insertableInstructionBase implements ixparser.ParsableIxBase
+	var _ ixparser.ParsableIx = (*insertableInstruction)(nil)
+	return slices.All(any(tx.ixs).([]ixparser.ParsableIx))
+}
+
+func (tx *insertableTransaction) Logs() iter.Seq2[int, string] {
+	return slices.All(tx.logs)
+}
+
+func newInsertableTransaction(tx *rpc.ParsedTransactionResult) (*insertableTransaction, error) {
+	itx := &insertableTransaction{
 		signature: tx.Transaction.Signatures[0],
 		timestamp: tx.BlockTime,
 		slot:      int64(tx.Slot),
 		err:       tx.Meta.Err == nil,
 
-		logs:      make([][]byte, 0),
+		logs:      make([]string, 0),
 		addresses: make([]string, 0),
 
 		ixs: make([]*insertableInstruction, 0),
@@ -97,36 +172,32 @@ func newInsertableTransaction(tx *rpc.ParsedTransactionResult) (*InsertableTrans
 		}
 
 		if bytes, err := base64.StdEncoding.DecodeString(dataEncoded); err == nil {
-			itx.logs = append(itx.logs, bytes)
+			hexEncdoded := hex.EncodeToString(bytes)
+			itx.logs = append(itx.logs, hexEncdoded)
 		}
 	}
 
 	for _, ix := range tx.Transaction.Message.Instructions {
-		accountsIdxs, err := json.Marshal(ix.AccountsIndexes)
+		insertableIx, err := newInsertableInstructionBase(ix, itx.addresses, false)
 		if err != nil {
 			return nil, err
 		}
 		itx.ixs = append(itx.ixs, &insertableInstruction{
-			insertableInstructionBase: &insertableInstructionBase{
-				program_id_index: int64(ix.ProgramIdIndex),
-				accounts_idxs:    string(accountsIdxs),
-				data:             ix.Data,
-			},
-			innerInstructions: make([]*insertableInstructionBase, 0),
+			insertableInstructionBase: insertableIx,
+			innerInstructions:         make([]*insertableInstructionBase, 0),
 		})
 	}
 	for _, innerIxs := range tx.Meta.InnerInstructions {
 		ix := itx.ixs[int(innerIxs.IxIndex)]
 		for _, innerIx := range innerIxs.Instructions {
-			accountsIds, err := json.Marshal(innerIx.Data)
+			insertableInnerIx, err := newInsertableInstructionBase(innerIx, itx.addresses, true)
 			if err != nil {
 				return nil, err
 			}
-			ix.innerInstructions = append(ix.innerInstructions, &insertableInstructionBase{
-				program_id_index: int64(innerIx.ProgramIdIndex),
-				accounts_idxs:    string(accountsIds),
-				data:             innerIx.Data,
-			})
+			ix.innerInstructions = append(
+				ix.innerInstructions,
+				insertableInnerIx,
+			)
 		}
 	}
 
@@ -158,10 +229,10 @@ func (pq *preparedQuery) string() string {
 	)
 }
 
-func prepareInsertTransactionsQuery(txs []*InsertableTransaction) *preparedQuery {
+func prepareInsertTransactionsQuery(txs []*insertableTransaction) *preparedQuery {
 	pq := newPreparedQuery(
-		"INSERT INTO transaction (signature, timestamp, slot, err, err_msg) VALUES",
-		"ON CONFLICT (signature) DO NOTHING RETURNING id;",
+		"INSERT INTO \"transaction\" (signature, timestamp, slot, err, err_msg) VALUES",
+		"ON CONFLICT (signature) DO NOTHING RETURNING signature, id",
 	)
 	for _, tx := range txs {
 		pq.placeholders = append(pq.placeholders, "(?, ?, ?, ?, ?)")
@@ -175,7 +246,7 @@ type insertedTransaction struct {
 	Id        int64
 }
 
-func insertTransactions(db *sql.DB, txs []*InsertableTransaction) error {
+func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -183,6 +254,7 @@ func insertTransactions(db *sql.DB, txs []*InsertableTransaction) error {
 	defer tx.Rollback()
 
 	txsPreparedQuery := prepareInsertTransactionsQuery(txs)
+	fmt.Printf("QUERY: %s\ntxs %#v\n", txsPreparedQuery.string(), txs)
 	rows, err := tx.Query(txsPreparedQuery.string(), txsPreparedQuery.args...)
 	if err != nil {
 		return err
@@ -191,18 +263,18 @@ func insertTransactions(db *sql.DB, txs []*InsertableTransaction) error {
 	insertedTxs := make([]*insertedTransaction, 0)
 	for rows.Next() {
 		t := new(insertedTransaction)
-		if err = rows.Scan(t); err != nil {
+		if err = rows.Scan(&t.Signature, &t.Id); err != nil {
 			return err
 		}
 		insertedTxs = append(insertedTxs, t)
 	}
 
 	accountsPreparedQuery := newPreparedQuery(
-		"INSERT INTO transaction_accounts (transaction_id, address, idx) VALUES",
+		"INSERT INTO transaction_account (transaction_id, address, idx) VALUES",
 		"",
 	)
 	logsPreparedQuery := newPreparedQuery(
-		"INSERT INTO transaction_logs (transaction_id, log, idx) VALUES",
+		"INSERT INTO transaction_log (transaction_id, log, idx) VALUES",
 		"",
 	)
 	ixsPreparedQuery := newPreparedQuery(
@@ -232,19 +304,31 @@ func insertTransactions(db *sql.DB, txs []*InsertableTransaction) error {
 			logsPreparedQuery.args = append(logsPreparedQuery.args, txId, log, logIdx)
 		}
 		for ixIdx, ix := range tx.ixs {
+			ixAccountsIdxs, err := json.Marshal(ix.accountsIndexes)
+			if err != nil {
+				return err
+			}
+			ixData := hex.EncodeToString(ix.data)
+
 			ixsPreparedQuery.placeholders = append(ixsPreparedQuery.placeholders, "(?, ?, ?, ?, ?)")
-			ixsPreparedQuery.args = append(ixsPreparedQuery.args, txId, ixIdx, ix.program_id_index, ix.accounts_idxs, ix.data)
+			ixsPreparedQuery.args = append(ixsPreparedQuery.args, txId, ixIdx, ix.programIdIdx, string(ixAccountsIdxs), ixData)
 
 			for innerIxIdx, innerIx := range ix.innerInstructions {
+				iixAccountsIdxs, err := json.Marshal(innerIx.accountsIndexes)
+				if err != nil {
+					return err
+				}
+				innerIxData := hex.EncodeToString(innerIx.data)
+
 				innerIxsPreparedQuery.placeholders = append(innerIxsPreparedQuery.placeholders, "(?, ?, ?, ?, ?, ?)")
 				innerIxsPreparedQuery.args = append(
 					innerIxsPreparedQuery.args,
 					txId,
 					ixIdx,
 					innerIxIdx,
-					innerIx.program_id_index,
-					innerIx.accounts_idxs,
-					innerIx.data,
+					innerIx.programIdIdx,
+					string(iixAccountsIdxs),
+					innerIxData,
 				)
 			}
 		}
@@ -275,6 +359,140 @@ func insertTransactions(db *sql.DB, txs []*InsertableTransaction) error {
 	return err
 }
 
+type savedInstructionBase struct {
+	programAddress string
+	accounts       []string
+	data           []byte
+}
+
+func (ix *savedInstructionBase) ProgramAddress() string {
+	return ix.programAddress
+}
+
+func (ix *savedInstructionBase) AccountsAddresses() []string {
+	return ix.accounts
+}
+
+func (ix *savedInstructionBase) Data() []byte {
+	return ix.data
+}
+
+type savedInstruction struct {
+	*savedInstructionBase
+	innerInstructions []*savedInstructionBase
+}
+
+func (ix *savedInstruction) InnerIxs() []ixparser.ParsableIxBase {
+	var _ ixparser.ParsableIxBase = (*savedInstruction)(nil)
+	return any(ix.innerInstructions).([]ixparser.ParsableIxBase)
+}
+
+func (ix *savedInstruction) AddEvent(_ ixparser.Event) {}
+
+type savedTransaction struct {
+	id           int64
+	logs         []string
+	instructions []*savedInstruction
+}
+
+func (tx *savedTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
+	var _ ixparser.ParsableIx = (*savedInstruction)(nil)
+	return slices.All(any(tx.instructions).([]ixparser.ParsableIx))
+}
+
+func (tx *savedTransaction) Logs() iter.Seq2[int, string] {
+	return slices.All(tx.logs)
+}
+
+type savedInstructionBaseSerialized struct {
+	ProgramAddress string `json:"program_address"`
+	AccountsIdxs   string `json:"accounts_idxs"`
+	Data           string
+}
+
+func deserializeIxAccountsAndData(
+	txAccounts []string,
+	accountsIdxsSerialized string,
+	dataSerialized string,
+) ([]string, []byte, error) {
+	var accountsIdxs []int
+	if err := json.Unmarshal([]byte(accountsIdxsSerialized), &accountsIdxs); err != nil {
+		return nil, nil, err
+	}
+	accountsAddresses := make([]string, len(accountsIdxs))
+	for i, idx := range accountsIdxs {
+		accountsAddresses[i] = txAccounts[idx]
+	}
+	ixData, err := hex.DecodeString(dataSerialized)
+	if err != nil {
+		return nil, nil, err
+	}
+	return accountsAddresses, ixData, nil
+}
+
+func deserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, error) {
+	var txAccounts []string
+	if err := json.Unmarshal(tx.Accounts.([]byte), &txAccounts); err != nil {
+		return nil, err
+	}
+
+	var logs []string
+	if err := json.Unmarshal(tx.Logs.([]byte), &logs); err != nil {
+		return nil, err
+	}
+
+	var ixs []*savedInstructionBaseSerialized
+	if err := json.Unmarshal(tx.Instructions.([]byte), &ixs); err != nil {
+		return nil, err
+	}
+	savedIxs := make([]*savedInstruction, 0)
+	for ixIdx, ix := range ixs {
+		accountsAddresses, ixData, err := deserializeIxAccountsAndData(txAccounts, ix.AccountsIdxs, ix.Data)
+		if err != nil {
+			return nil, err
+		}
+		savedIxs[ixIdx] = &savedInstruction{
+			savedInstructionBase: &savedInstructionBase{
+				programAddress: ix.ProgramAddress,
+				accounts:       accountsAddresses,
+				data:           ixData,
+			},
+			innerInstructions: make([]*savedInstructionBase, 0),
+		}
+	}
+
+	var innerInstructionsGroups []*dbgen.VInnerInstruction
+	if err := json.Unmarshal(tx.InnerInstructions.([]byte), &innerInstructionsGroups); err != nil {
+		return nil, err
+	}
+
+	for _, innerIxsGroup := range innerInstructionsGroups {
+		var iixs []*savedInstructionBaseSerialized
+		if err := json.Unmarshal(innerIxsGroup.Iixs.([]byte), &iixs); err != nil {
+			return nil, err
+		}
+		for _, innerIx := range iixs {
+			accountsAddresses, iixData, err := deserializeIxAccountsAndData(txAccounts, innerIx.AccountsIdxs, innerIx.Data)
+			if err != nil {
+				return nil, err
+			}
+			iix := &savedInstructionBase{
+				programAddress: innerIx.ProgramAddress,
+				accounts:       accountsAddresses,
+				data:           iixData,
+			}
+			ix := savedIxs[innerIxsGroup.IxIdx]
+			ix.innerInstructions = append(ix.innerInstructions, iix)
+		}
+	}
+
+	return &savedTransaction{
+		id:           tx.ID,
+		logs:         logs,
+		instructions: savedIxs,
+	}, nil
+}
+
 func SyncWallet(
 	rpcClient *rpc.Client,
 	db *sql.DB,
@@ -282,7 +500,7 @@ func SyncWallet(
 	walletAddress string,
 ) {
 	slog.Info("running wallet sync", "walletAddress", walletAddress)
-	l := uint64(1000)
+	l := uint64(1)
 	getSignaturesConfig := rpc.GetSignaturesForAddressConfig{
 		Limit:      &l,
 		Commitment: rpc.CommitmentConfirmed,
@@ -292,18 +510,27 @@ func SyncWallet(
 		signaturesResults, err := forceRpcRequest(func() ([]*rpc.SignatureResult, error) {
 			return rpcClient.GetSignaturesForAddress(walletAddress, &getSignaturesConfig)
 		}, 5)
-		assert.NoErr(err, "unable to fetch singatures")
+		assert.NoErr(err, "unable to fetch signatures")
 		slog.Info("fetched signatures for wallet", "signatures", len(signaturesResults))
+
+		if len(signaturesResults) == 0 {
+			return
+		}
 
 		signatures := make([]string, len(signaturesResults))
 		for i, sr := range signaturesResults {
 			signatures[i] = sr.Signature
 		}
 		savedTransactions, err := q.FetchTransactions(context.Background(), signatures)
-		// parse associated accounts for saved transactions
+		fmt.Printf("saved transactions %#v\n", savedTransactions)
+		assert.NoErr(err, "unable to fetch saved transactions")
+		for _, tx := range savedTransactions {
+			deserializedSavedTx, err := deserializeSavedTransaction(tx)
+			assert.NoErr(err, "unable to deserialize saved tx", "tx", tx)
+			_ = ixparser.ParseTx(deserializedSavedTx)
+		}
 
-		insertableTransactions := make([]*InsertableTransaction, 0)
-
+		insertableTransactions := make([]*insertableTransaction, 0)
 		for _, sr := range signaturesResults {
 			if txIdx := slices.IndexFunc(savedTransactions, func(tx *dbgen.VTransaction) bool {
 				return tx.Signature == sr.Signature
@@ -311,7 +538,7 @@ func SyncWallet(
 				continue
 			}
 
-			slog.Info("fetching tx")
+			slog.Info("fetching tx", "signature", sr.Signature)
 			tx, err := forceRpcRequest(func() (*rpc.ParsedTransactionResult, error) {
 				return rpcClient.GetTransaction(sr.Signature, rpc.CommitmentConfirmed)
 			}, 5)
@@ -319,10 +546,18 @@ func SyncWallet(
 
 			insertableTx, err := newInsertableTransaction(tx)
 			assert.NoErr(err, "unable to create insertable tx")
+
+			_ = ixparser.ParseTx(insertableTx)
+
 			insertableTransactions = append(insertableTransactions, insertableTx)
 		}
 
 		err = insertTransactions(db, insertableTransactions)
 		assert.NoErr(err, "unable to insert transactions")
+
+		if len(signatures) < int(l) {
+			return
+		}
+		getSignaturesConfig.Before = signatures[0]
 	}
 }

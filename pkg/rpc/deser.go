@@ -31,11 +31,10 @@ func deserializeCompactU16(data []byte) (uint16, int, error) {
 		shift := 7 * i
 		elemVal <<= shift
 
-		newVal := val | elemVal
-		if newVal > math.MaxUint16 {
+		if elemVal > math.MaxUint16 {
 			return 0, 0, fmt.Errorf("unable to deserialize compactU16: newVal overflow")
 		}
-		deserialized += uint16(newVal)
+		deserialized += uint16(elemVal)
 		if elemDone {
 			break
 		}
@@ -61,9 +60,9 @@ func deserializeInstruction(data []byte) (*TransactionInstructionBase, int, erro
 		return nil, 0, fmt.Errorf("deserialize ix error: accounts indexes too short")
 	}
 
-	accountsIndexes := make([]uint8, accountsIndexesLen)
+	accountsIndexes := make([]int, accountsIndexesLen)
 	for i := range accountsIndexesLen {
-		accountsIndexes[i] = data[offset]
+		accountsIndexes[i] = int(data[offset])
 		offset += 1
 	}
 
@@ -79,16 +78,17 @@ func deserializeInstruction(data []byte) (*TransactionInstructionBase, int, erro
 
 	ixData := make([]byte, dataLen)
 	copy(ixData, data[offset:offset+int(dataLen)])
-	// ixDataEncoded := base64.StdEncoding.EncodeToString(ixData)
+	ixDataEncoded := base64.StdEncoding.EncodeToString(ixData)
 	offset += int(dataLen)
 
 	ix := &TransactionInstructionBase{
 		ProgramIdIndex:  programIdIndex,
 		AccountsIndexes: accountsIndexes,
-		Data:            ixData,
+		Data:            ixDataEncoded,
 	}
 	return ix, offset, nil
 }
+
 func deserializeLegacyMessage(data []byte) (*TransactionMessage, int, error) {
 	if len(data) < 3 {
 		return nil, 0, fmt.Errorf("unable to deserialize msg: data empty")
@@ -229,7 +229,7 @@ func DeserializeTransaction(encoded, encoding string) (*Transaction, error) {
 		return nil, fmt.Errorf("deserialize transaction err: unable to decode transaction")
 	}
 
-	offset, signaturesLen, err := deserializeCompactU16(data)
+	signaturesLen, offset, err := deserializeCompactU16(data)
 	if err != nil {
 		return nil, fmt.Errorf("deserialize transaction err: %w", err)
 	}
@@ -251,16 +251,19 @@ func DeserializeTransaction(encoded, encoding string) (*Transaction, error) {
 		switch version {
 		case 0:
 			msg, _, err = deserializeV0Message(data[offset:])
+			if err != nil {
+				return nil, fmt.Errorf("deserialize v0 transaction err: %w", err)
+			}
 			msg.Version = 0
 		default:
 			return nil, fmt.Errorf("deserialize transaction err: invalid msg version: %d", version)
 		}
 	} else {
 		msg, _, err = deserializeLegacyMessage(data[offset:])
+		if err != nil {
+			return nil, fmt.Errorf("deserialize legacy transaction err: %w", err)
+		}
 		msg.Version = 255
-	}
-	if err != nil {
-		return nil, fmt.Errorf("deserialize transaction err: %w", err)
 	}
 
 	tx := &Transaction{

@@ -63,9 +63,7 @@ func NewClientWithTimer(url string, timeout time.Duration) *Client {
 func (c *Client) execute(method string, params any, out interface{}) error {
 	if c.limiter != nil {
 		<-c.limiter.C
-	}
-	if c.timeout != nil {
-		c.limiter = time.NewTimer(*c.timeout)
+		c.limiter = nil
 	}
 
 	rId := reqId.Add(1)
@@ -89,15 +87,17 @@ func (c *Client) execute(method string, params any, out interface{}) error {
 	if err != nil {
 		return err
 	}
+	if c.timeout != nil {
+		c.limiter = time.NewTimer(*c.timeout)
+	}
+
+	text, _ := io.ReadAll(res.Body)
+	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		text, _ := io.ReadAll(res.Body)
 		fmt.Printf("Response body: %s\n", string(text))
 		return fmt.Errorf("response status code != 200: %s\n", string(text))
 	}
-
-	defer res.Body.Close()
-	text, _ := io.ReadAll(res.Body)
 	if err = json.Unmarshal(text, out); err != nil {
 		return fmt.Errorf("unable to parse response body: %s\nErr: %s\n", string(text), err)
 	}
@@ -151,8 +151,8 @@ func (c *Client) GetSignaturesForAddress(address string, config *GetSignaturesFo
 
 type TransactionInstructionBase struct {
 	ProgramIdIndex  uint8
-	AccountsIndexes []uint8 `json:"accounts"`
-	Data            []byte
+	AccountsIndexes []int `json:"accounts"`
+	Data            string
 }
 
 type TransactionInnerInstructions struct {
@@ -262,6 +262,13 @@ func (c *Client) GetTransaction(signature string, commitment Commitment) (*Parse
 	if err != nil {
 		return nil, err
 	}
+	if dataErr := data.formatError(); dataErr != nil {
+		return nil, dataErr
+	}
+	if data.Result == nil {
+		// for some reason some responses don't have result or error
+		return nil, fmt.Errorf("invalid response")
+	}
 
 	tx, err := DeserializeTransaction(data.Result.Transaction[0], data.Result.Transaction[1])
 	if err != nil {
@@ -272,5 +279,5 @@ func (c *Client) GetTransaction(signature string, commitment Commitment) (*Parse
 		Transaction:       tx,
 	}
 
-	return parsed, data.formatError()
+	return parsed, nil
 }
