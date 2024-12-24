@@ -10,6 +10,8 @@ CREATE TABLE "transaction" (
     err_msg TEXT
 );
 
+CREATE INDEX transaction_signature ON "transaction" (signature);
+
 CREATE TABLE transaction_account (
     transaction_id INTEGER NOT NULL,
     address TEXT NOT NULL,
@@ -88,61 +90,55 @@ FROM
 GROUP BY
     transaction_id;
 
-CREATE VIEW v_instructions AS
-SELECT
-    ix.transaction_id,
-    COALESCE(
-        json_group_array (
-            CASE
-                WHEN ix.transaction_id IS NOT NULL THEN json_object (
-                    'program_address',
-                    ta.address,
-                    'accounts_idxs',
-                    ix.accounts_idxs,
-                    'data',
-                    ix.data
-                )
-            END
-        ),
-        '[]'
-    ) AS ixs
-FROM
-    instruction ix
-    JOIN transaction_account ta ON ta.transaction_id = ix.transaction_id
-    AND ta.idx = ix.program_id_idx
-GROUP BY
-    ix.transaction_id
-ORDER BY
-    ix.idx;
-
-CREATE VIEW v_inner_instructions AS
+CREATE VIEW v_inner_instruction AS
 SELECT
     iix.transaction_id,
     iix.ix_idx,
-    COALESCE(
-        json_group_array (
-            CASE
-                WHEN iix.transaction_id IS NOT NULL THEN json_object (
-                    'program_address',
-                    ta.address,
-                    'accounts_idxs',
-                    iix.accounts_idxs,
-                    'data',
-                    iix.data
-                )
-            END
-        ),
-        '[]'
-    ) AS iixs
+    ta.address AS program_address,
+    iix.accounts_idxs,
+    iix.data
 FROM
     inner_instruction iix
     JOIN transaction_account ta ON ta.transaction_id = iix.transaction_id
     AND ta.idx = iix.program_id_idx
-GROUP BY
-    iix.transaction_id,
-    iix.ix_idx
 ORDER BY
     iix.idx;
+
+CREATE VIEW v_instruction AS
+SELECT
+    ix.transaction_id,
+    ta.address AS program_address,
+    ix.accounts_idxs,
+    ix.data,
+    COALESCE(
+        nullif(
+            json_group_array (
+                CASE
+                    WHEN iix.transaction_id IS NOT NULL THEN json_object (
+                        'program_address',
+                        iix.program_address,
+                        'accounts_idxs',
+                        iix.accounts_idxs,
+                        'data',
+                        iix.data
+                    )
+                END
+            ),
+            '[null]'
+        ),
+        '[]'
+    ) AS inner_ixs
+FROM
+    instruction ix
+    JOIN transaction_account ta ON ta.transaction_id = ix.transaction_id
+    AND ta.idx = ix.program_id_idx
+    LEFT JOIN v_inner_instruction iix ON iix.transaction_id = ix.transaction_id
+    AND iix.ix_idx = ix.idx
+GROUP BY
+    ix.transaction_id,
+    ix.idx
+ORDER BY
+    ix.idx;
 
 CREATE VIEW v_transaction AS
 SELECT
@@ -150,11 +146,30 @@ SELECT
     t.id,
     ta.addresses AS accounts,
     tl.logs AS logs,
-    ixs.ixs AS instructions,
-    iixs.iixs AS inner_instructions
+    COALESCE(
+        nullif(
+            json_group_array (
+                CASE
+                    WHEN ix.transaction_id IS NOT NULL THEN json_object (
+                        'program_address',
+                        ix.program_address,
+                        'accounts_idxs',
+                        ix.accounts_idxs,
+                        'data',
+                        ix.data,
+                        'inner_ixs',
+                        ix.inner_ixs
+                    )
+                END
+            ),
+            '[null]'
+        ),
+        '[]'
+    ) AS instructions
 FROM
     "transaction" t
     LEFT JOIN v_transaction_accounts ta ON ta.transaction_id = t.id
     LEFT JOIN v_transaction_logs tl ON tl.transaction_id = t.id
-    LEFT JOIN v_instructions ixs ON ixs.transaction_id = t.id
-    LEFT JOIN v_inner_instructions iixs ON iixs.transaction_id = t.id;
+    LEFT JOIN v_instruction ix ON ix.transaction_id = t.id
+GROUP BY
+    t.id;

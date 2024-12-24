@@ -1,8 +1,8 @@
 DROP VIEW IF EXISTS v_transaction;
 
-DROP VIEW IF EXISTS v_instructions;
+DROP VIEW IF EXISTS v_instruction;
 
-DROP VIEW IF EXISTS v_inner_instructions;
+DROP VIEW IF EXISTS v_inner_instruction;
 
 DROP VIEW IF EXISTS v_transaction_accounts;
 

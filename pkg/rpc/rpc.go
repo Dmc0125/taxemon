@@ -281,3 +281,37 @@ func (c *Client) GetTransaction(signature string, commitment Commitment) (*Parse
 
 	return parsed, nil
 }
+
+type BlockResult struct {
+	Blockhash         string
+	PreviousBlockhash string
+	ParentSlot        uint64
+	Signatures        []string
+	BlockTime         int64  `json:"blockTime,omitempty"`
+	BlockHeight       uint64 `json:"blockHeight,omitempty"`
+}
+
+type ResponseGetBlock struct {
+	*Response
+	Result *BlockResult
+}
+
+func (c *Client) GetBlock(slot uint64, commitment Commitment) (*BlockResult, error) {
+	config := map[string]interface{}{
+		"commitment":                     commitment,
+		"encoding":                       EncodingBase64,
+		"transactionDetails":             "signatures",
+		"maxSupportedTransactionVersion": 0,
+		"rewards":                        false,
+	}
+	params := []interface{}{slot, config}
+	data := new(ResponseGetBlock)
+	err := c.execute("getBlock", params, data)
+	if err != nil {
+		return nil, err
+	}
+	if data.Result == nil {
+		return nil, fmt.Errorf("block is not confirmed")
+	}
+	return data.Result, data.formatError()
+}

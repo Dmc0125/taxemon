@@ -55,23 +55,27 @@ type TransactionLog struct {
 }
 
 type VInnerInstruction struct {
-	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
-	IxIdx         int64       `db:"ix_idx" json:"ix_idx"`
-	Iixs          interface{} `db:"iixs" json:"iixs"`
+	TransactionID  int64  `db:"transaction_id" json:"transaction_id"`
+	IxIdx          int64  `db:"ix_idx" json:"ix_idx"`
+	ProgramAddress string `db:"program_address" json:"program_address"`
+	AccountsIdxs   string `db:"accounts_idxs" json:"accounts_idxs"`
+	Data           string `db:"data" json:"data"`
 }
 
 type VInstruction struct {
-	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
-	Ixs           interface{} `db:"ixs" json:"ixs"`
+	TransactionID  int64       `db:"transaction_id" json:"transaction_id"`
+	ProgramAddress string      `db:"program_address" json:"program_address"`
+	AccountsIdxs   string      `db:"accounts_idxs" json:"accounts_idxs"`
+	Data           string      `db:"data" json:"data"`
+	InnerIxs       interface{} `db:"inner_ixs" json:"inner_ixs"`
 }
 
 type VTransaction struct {
-	Signature         string      `db:"signature" json:"signature"`
-	ID                int64       `db:"id" json:"id"`
-	Accounts          interface{} `db:"accounts" json:"accounts"`
-	Logs              interface{} `db:"logs" json:"logs"`
-	Instructions      interface{} `db:"instructions" json:"instructions"`
-	InnerInstructions interface{} `db:"inner_instructions" json:"inner_instructions"`
+	Signature    string      `db:"signature" json:"signature"`
+	ID           int64       `db:"id" json:"id"`
+	Accounts     interface{} `db:"accounts" json:"accounts"`
+	Logs         interface{} `db:"logs" json:"logs"`
+	Instructions interface{} `db:"instructions" json:"instructions"`
 }
 
 type VTransactionAccount struct {

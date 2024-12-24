@@ -254,7 +254,6 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 	defer tx.Rollback()
 
 	txsPreparedQuery := prepareInsertTransactionsQuery(txs)
-	fmt.Printf("QUERY: %s\ntxs %#v\n", txsPreparedQuery.string(), txs)
 	rows, err := tx.Query(txsPreparedQuery.string(), txsPreparedQuery.args...)
 	if err != nil {
 		return err
@@ -335,21 +334,30 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 	}
 
 	var eg errgroup.Group
-	eg.TryGo(func() error {
-		_, err := tx.Exec(accountsPreparedQuery.string(), accountsPreparedQuery.args...)
-		return err
-	})
-	eg.TryGo(func() error {
-		_, err := tx.Exec(logsPreparedQuery.string(), logsPreparedQuery.args...)
-		return err
-	})
-	eg.TryGo(func() error {
-		_, err := tx.Exec(ixsPreparedQuery.string(), ixsPreparedQuery.args...)
-		if err != nil {
+	if len(accountsPreparedQuery.args) > 0 {
+		eg.TryGo(func() error {
+			_, err := tx.Exec(accountsPreparedQuery.string(), accountsPreparedQuery.args...)
 			return err
+		})
+	}
+	if len(logsPreparedQuery.args) > 0 {
+		eg.TryGo(func() error {
+			_, err := tx.Exec(logsPreparedQuery.string(), logsPreparedQuery.args...)
+			return err
+		})
+	}
+	eg.TryGo(func() error {
+		if len(ixsPreparedQuery.args) > 0 {
+			_, err := tx.Exec(ixsPreparedQuery.string(), ixsPreparedQuery.args...)
+			if err != nil {
+				return err
+			}
+			if len(innerIxsPreparedQuery.args) > 0 {
+				_, err = tx.Exec(innerIxsPreparedQuery.string(), innerIxsPreparedQuery.args...)
+				return err
+			}
 		}
-		_, err = tx.Exec(innerIxsPreparedQuery.string(), innerIxsPreparedQuery.args...)
-		return err
+		return nil
 	})
 	if err = eg.Wait(); err != nil {
 		return err
@@ -432,21 +440,42 @@ func deserializeIxAccountsAndData(
 
 func deserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, error) {
 	var txAccounts []string
-	if err := json.Unmarshal(tx.Accounts.([]byte), &txAccounts); err != nil {
-		return nil, err
+	if tx.Accounts != nil {
+		if err := json.Unmarshal([]byte(tx.Accounts.(string)), &txAccounts); err != nil {
+			return nil, err
+		}
 	}
 
 	var logs []string
-	if err := json.Unmarshal(tx.Logs.([]byte), &logs); err != nil {
-		return nil, err
+	if tx.Logs != nil {
+		if err := json.Unmarshal([]byte(tx.Logs.(string)), &logs); err != nil {
+			return nil, err
+		}
 	}
 
-	var ixs []*savedInstructionBaseSerialized
-	if err := json.Unmarshal(tx.Instructions.([]byte), &ixs); err != nil {
+	var ixs []*dbgen.VInstruction
+	if err := json.Unmarshal([]byte(tx.Instructions.(string)), &ixs); err != nil {
 		return nil, err
 	}
-	savedIxs := make([]*savedInstruction, 0)
+	savedIxs := make([]*savedInstruction, len(ixs))
 	for ixIdx, ix := range ixs {
+		var innerIxs []*dbgen.VInnerInstruction
+		if err := json.Unmarshal([]byte(ix.InnerIxs.(string)), &innerIxs); err != nil {
+			return nil, err
+		}
+		savedInnerIxs := make([]*savedInstructionBase, len(innerIxs))
+		for i, iix := range innerIxs {
+			accountsAddresses, iixData, err := deserializeIxAccountsAndData(txAccounts, iix.AccountsIdxs, iix.Data)
+			if err != nil {
+				return nil, err
+			}
+			savedInnerIxs[i] = &savedInstructionBase{
+				programAddress: iix.ProgramAddress,
+				accounts:       accountsAddresses,
+				data:           iixData,
+			}
+		}
+
 		accountsAddresses, ixData, err := deserializeIxAccountsAndData(txAccounts, ix.AccountsIdxs, ix.Data)
 		if err != nil {
 			return nil, err
@@ -457,32 +486,7 @@ func deserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, err
 				accounts:       accountsAddresses,
 				data:           ixData,
 			},
-			innerInstructions: make([]*savedInstructionBase, 0),
-		}
-	}
-
-	var innerInstructionsGroups []*dbgen.VInnerInstruction
-	if err := json.Unmarshal(tx.InnerInstructions.([]byte), &innerInstructionsGroups); err != nil {
-		return nil, err
-	}
-
-	for _, innerIxsGroup := range innerInstructionsGroups {
-		var iixs []*savedInstructionBaseSerialized
-		if err := json.Unmarshal(innerIxsGroup.Iixs.([]byte), &iixs); err != nil {
-			return nil, err
-		}
-		for _, innerIx := range iixs {
-			accountsAddresses, iixData, err := deserializeIxAccountsAndData(txAccounts, innerIx.AccountsIdxs, innerIx.Data)
-			if err != nil {
-				return nil, err
-			}
-			iix := &savedInstructionBase{
-				programAddress: innerIx.ProgramAddress,
-				accounts:       accountsAddresses,
-				data:           iixData,
-			}
-			ix := savedIxs[innerIxsGroup.IxIdx]
-			ix.innerInstructions = append(ix.innerInstructions, iix)
+			innerInstructions: savedInnerIxs,
 		}
 	}
 
@@ -493,6 +497,86 @@ func deserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, err
 	}, nil
 }
 
+func fixTimestampDuplicates(rpcClient *rpc.Client, db *sql.DB, q *dbgen.Queries) error {
+	txs, err := q.FetchDuplicateTimestampsTransactions(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(txs) == 0 {
+		return nil
+	}
+
+	slots := make(map[int64][]string)
+	for _, tx := range txs {
+		_, ok := slots[tx.Slot]
+		if !ok {
+			slots[tx.Slot] = []string{tx.Signature}
+		} else {
+			slots[tx.Slot] = append(slots[tx.Slot], tx.Signature)
+		}
+	}
+
+	placeholders := make([]string, 0)
+	args := make([]interface{}, 0)
+	for slot, slotSignatures := range slots {
+		block, err := rpcClient.GetBlock(uint64(slot), rpc.CommitmentConfirmed)
+		if err != nil {
+			return err
+		}
+		for _, signature := range slotSignatures {
+			blockIndex := slices.IndexFunc(block.Signatures, func(s string) bool {
+				return s == signature
+			})
+			if blockIndex == -1 {
+				return fmt.Errorf("unable to find signature on block")
+			}
+			placeholders = append(placeholders, "(?,?)")
+			args = append(args, blockIndex, signature)
+		}
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("CREATE TEMP TABLE bi_updates (bi INTEGER, sig TEXT)"); err != nil {
+		return err
+	}
+
+	insertQuery := strings.Builder{}
+	insertQuery.WriteString("INSERT INTO bi_updates (bi, sig) VALUES ")
+	insertQuery.WriteString(strings.Join(placeholders, ","))
+	if _, err = tx.Exec(insertQuery.String(), args...); err != nil {
+		return err
+	}
+
+	updateQuery := `
+		UPDATE
+			"transaction"
+		SET
+			block_index = (
+				SELECT
+					bi
+				FROM
+					bi_updates
+				WHERE
+					sig = signature
+			)
+		WHERE
+			signature IN (SELECT sig FROM bi_updates)
+	`
+	if _, err = tx.Exec(updateQuery); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("DROP TABLE bi_updates"); err != nil {
+		return err
+	}
+
+	err = tx.Commit()
+	return err
+}
+
 func SyncWallet(
 	rpcClient *rpc.Client,
 	db *sql.DB,
@@ -500,7 +584,7 @@ func SyncWallet(
 	walletAddress string,
 ) {
 	slog.Info("running wallet sync", "walletAddress", walletAddress)
-	l := uint64(1)
+	l := uint64(1000)
 	getSignaturesConfig := rpc.GetSignaturesForAddressConfig{
 		Limit:      &l,
 		Commitment: rpc.CommitmentConfirmed,
@@ -514,7 +598,7 @@ func SyncWallet(
 		slog.Info("fetched signatures for wallet", "signatures", len(signaturesResults))
 
 		if len(signaturesResults) == 0 {
-			return
+			break
 		}
 
 		signatures := make([]string, len(signaturesResults))
@@ -522,7 +606,6 @@ func SyncWallet(
 			signatures[i] = sr.Signature
 		}
 		savedTransactions, err := q.FetchTransactions(context.Background(), signatures)
-		fmt.Printf("saved transactions %#v\n", savedTransactions)
 		assert.NoErr(err, "unable to fetch saved transactions")
 		for _, tx := range savedTransactions {
 			deserializedSavedTx, err := deserializeSavedTransaction(tx)
@@ -552,12 +635,17 @@ func SyncWallet(
 			insertableTransactions = append(insertableTransactions, insertableTx)
 		}
 
-		err = insertTransactions(db, insertableTransactions)
-		assert.NoErr(err, "unable to insert transactions")
+		if len(insertableTransactions) > 0 {
+			err = insertTransactions(db, insertableTransactions)
+			assert.NoErr(err, "unable to insert transactions")
+		}
 
 		if len(signatures) < int(l) {
-			return
+			break
 		}
 		getSignaturesConfig.Before = signatures[0]
 	}
+
+	err := fixTimestampDuplicates(rpcClient, db, q)
+	assert.NoErr(err, "unbale to fix timestamps duplicates")
 }

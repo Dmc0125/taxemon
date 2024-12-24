@@ -10,9 +10,55 @@ import (
 	"strings"
 )
 
+const fetchDuplicateTimestampsTransactions = `-- name: FetchDuplicateTimestampsTransactions :many
+SELECT
+    t1.slot,
+    t1.signature
+FROM
+    "transaction" t1
+    LEFT JOIN "transaction" t2 ON t2.slot = t1.slot
+    AND t2.timestamp = t1.timestamp
+    AND t2.signature != t1.signature
+WHERE
+    t1.block_index IS NULL
+    AND t2.block_index IS NULL
+    AND t2.id IS NOT NULL
+GROUP BY
+    t1.slot,
+    t1.signature
+`
+
+type FetchDuplicateTimestampsTransactionsRow struct {
+	Slot      int64  `db:"slot" json:"slot"`
+	Signature string `db:"signature" json:"signature"`
+}
+
+func (q *Queries) FetchDuplicateTimestampsTransactions(ctx context.Context) ([]*FetchDuplicateTimestampsTransactionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, fetchDuplicateTimestampsTransactions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*FetchDuplicateTimestampsTransactionsRow
+	for rows.Next() {
+		var i FetchDuplicateTimestampsTransactionsRow
+		if err := rows.Scan(&i.Slot, &i.Signature); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const fetchTransactions = `-- name: FetchTransactions :many
 SELECT
-    signature, id, accounts, logs, instructions, inner_instructions
+    signature, id, accounts, logs, instructions
 FROM
     v_transaction t
 WHERE
@@ -44,7 +90,6 @@ func (q *Queries) FetchTransactions(ctx context.Context, signatures []string) ([
 			&i.Accounts,
 			&i.Logs,
 			&i.Instructions,
-			&i.InnerInstructions,
 		); err != nil {
 			return nil, err
 		}
