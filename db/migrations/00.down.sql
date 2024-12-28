@@ -8,6 +8,8 @@ DROP VIEW IF EXISTS v_transaction_accounts;
 
 DROP VIEW IF EXISTS v_transaction_logs;
 
+DROP TABLE IF EXISTS associated_account;
+
 DROP TABLE IF EXISTS event;
 
 DROP TABLE IF EXISTS inner_instruction;

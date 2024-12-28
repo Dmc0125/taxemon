@@ -61,15 +61,29 @@ CREATE TABLE inner_instruction (
 CREATE TABLE event (
     transaction_id INTEGER NOT NULL,
     ix_idx INTEGER NOT NULL,
+    idx INTEGER NOT NULL,
     --
     -- 0 -> transfer
+    -- 1 -> mint
+    -- 2 -> burn
+    -- 3 -> close account
     type INTEGER NOT NULL,
     -- event data stored as json string bytes
-    data BLOB NOT NULL,
+    data TEXT NOT NULL,
     --
     PRIMARY KEY (transaction_id, ix_idx),
     FOREIGN KEY (transaction_id) REFERENCES "transaction" (id),
     FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (tranaction_id, ix_idx) ON DELETE CASCADE
+);
+
+CREATE TABLE associated_account (
+    address TEXT NOT NULL,
+    --
+    -- 0 -> token account
+    type INTEGER NOT NULL,
+    data TEXT,
+    --
+    PRIMARY KEY (address)
 );
 
 CREATE VIEW v_transaction_accounts AS

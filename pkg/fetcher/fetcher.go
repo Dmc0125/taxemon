@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"taxemon/pkg/assert"
@@ -97,9 +98,11 @@ type insertableInstruction struct {
 }
 
 func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
-	// compiler check if insertableInstructionBase implements ixparser.ParsableIxBase
-	var _ ixparser.ParsableIxBase = (*insertableInstructionBase)(nil)
-	return any(ix.innerInstructions).([]ixparser.ParsableIxBase)
+	iixs := make([]ixparser.ParsableIxBase, len(ix.innerInstructions))
+	for i, iix := range ix.innerInstructions {
+		iixs[i] = iix
+	}
+	return iixs
 }
 
 func (ix *insertableInstruction) AddEvent(event ixparser.Event) {
@@ -119,10 +122,16 @@ type insertableTransaction struct {
 	ixs []*insertableInstruction
 }
 
+func (tx *insertableTransaction) Signature() string {
+	return tx.signature
+}
+
 func (tx *insertableTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
-	// compiler check if insertableInstructionBase implements ixparser.ParsableIxBase
-	var _ ixparser.ParsableIx = (*insertableInstruction)(nil)
-	return slices.All(any(tx.ixs).([]ixparser.ParsableIx))
+	ixs := make([]ixparser.ParsableIx, len(tx.ixs))
+	for i, ix := range tx.ixs {
+		ixs[i] = ix
+	}
+	return slices.All(ixs)
 }
 
 func (tx *insertableTransaction) Logs() iter.Seq2[int, string] {
@@ -284,6 +293,10 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 		"INSERT INTO inner_instruction (transaction_id, ix_idx, idx, program_id_idx, accounts_idxs, data) VALUES",
 		"",
 	)
+	eventsPreparedQuery := newPreparedQuery(
+		"INSERT INTO event (transaction_id, ix_idx, idx, type, data) VALUES",
+		"",
+	)
 
 	for _, tx := range txs {
 		txIdIdx := slices.IndexFunc(insertedTxs, func(itx *insertedTransaction) bool {
@@ -330,6 +343,15 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 					innerIxData,
 				)
 			}
+
+			for eventIdx, event := range ix.events {
+				eventSerialized, err := json.Marshal(event)
+				if err != nil {
+					return err
+				}
+				eventsPreparedQuery.placeholders = append(eventsPreparedQuery.placeholders, "(?, ?, ?, ?, ?)")
+				eventsPreparedQuery.args = append(eventsPreparedQuery.args, txId, ixIdx, eventIdx, event.Type(), string(eventSerialized))
+			}
 		}
 	}
 
@@ -346,24 +368,46 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 			return err
 		})
 	}
-	eg.TryGo(func() error {
-		if len(ixsPreparedQuery.args) > 0 {
-			_, err := tx.Exec(ixsPreparedQuery.string(), ixsPreparedQuery.args...)
-			if err != nil {
+	if len(ixsPreparedQuery.args) > 0 {
+		eg.TryGo(func() error {
+			if _, err := tx.Exec(ixsPreparedQuery.string(), ixsPreparedQuery.args...); err != nil {
 				return err
 			}
 			if len(innerIxsPreparedQuery.args) > 0 {
-				_, err = tx.Exec(innerIxsPreparedQuery.string(), innerIxsPreparedQuery.args...)
-				return err
+				eg.TryGo(func() error {
+					_, err = tx.Exec(innerIxsPreparedQuery.string(), innerIxsPreparedQuery.args...)
+					return err
+				})
 			}
-		}
-		return nil
-	})
+			if len(eventsPreparedQuery.args) > 0 {
+				eg.TryGo(func() error {
+					_, err := tx.Exec(eventsPreparedQuery.string(), eventsPreparedQuery.args...)
+					return err
+				})
+			}
+			return nil
+		})
+	}
 	if err = eg.Wait(); err != nil {
 		return err
 	}
 
 	err = tx.Commit()
+	return err
+}
+
+func insertAssociatedAccounts(db *sql.DB, associatedAccounts []ixparser.AssociatedAccount) error {
+	q := newPreparedQuery("INSERT INTO associated_account (address, type, data) VALUES", "")
+	for _, account := range associatedAccounts {
+		data, err := account.Data()
+		if err != nil {
+			return err
+		}
+
+		q.placeholders = append(q.placeholders, "(?, ?, ?)")
+		q.args = append(q.args, account.Address(), account.Type(), string(data))
+	}
+	_, err := db.Exec(q.string(), q.args...)
 	return err
 }
 
@@ -391,21 +435,32 @@ type savedInstruction struct {
 }
 
 func (ix *savedInstruction) InnerIxs() []ixparser.ParsableIxBase {
-	var _ ixparser.ParsableIxBase = (*savedInstruction)(nil)
-	return any(ix.innerInstructions).([]ixparser.ParsableIxBase)
+	iixs := make([]ixparser.ParsableIxBase, len(ix.innerInstructions))
+	for i, iix := range ix.innerInstructions {
+		iixs[i] = iix
+	}
+	return iixs
 }
 
 func (ix *savedInstruction) AddEvent(_ ixparser.Event) {}
 
 type savedTransaction struct {
+	signature    string
 	id           int64
 	logs         []string
 	instructions []*savedInstruction
 }
 
+func (tx *savedTransaction) Signature() string {
+	return tx.signature
+}
+
 func (tx *savedTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
-	var _ ixparser.ParsableIx = (*savedInstruction)(nil)
-	return slices.All(any(tx.instructions).([]ixparser.ParsableIx))
+	ixs := make([]ixparser.ParsableIx, len(tx.instructions))
+	for i, ix := range tx.instructions {
+		ixs[i] = ix
+	}
+	return slices.All(ixs)
 }
 
 func (tx *savedTransaction) Logs() iter.Seq2[int, string] {
@@ -491,6 +546,7 @@ func deserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, err
 	}
 
 	return &savedTransaction{
+		signature:    tx.Signature,
 		id:           tx.ID,
 		logs:         logs,
 		instructions: savedIxs,
@@ -577,13 +633,46 @@ func fixTimestampDuplicates(rpcClient *rpc.Client, db *sql.DB, q *dbgen.Queries)
 	return err
 }
 
-func SyncWallet(
+type AssociatedAccounts struct {
+	currentIter map[string]ixparser.AssociatedAccount
+	all         map[string]ixparser.AssociatedAccount
+}
+
+func newAssociatedAccounts() *AssociatedAccounts {
+	return &AssociatedAccounts{
+		currentIter: make(map[string]ixparser.AssociatedAccount),
+		all:         make(map[string]ixparser.AssociatedAccount),
+	}
+}
+
+func (a *AssociatedAccounts) Flush() []ixparser.AssociatedAccount {
+	fmt.Printf("associated accounts %#v", a.currentIter)
+	if len(a.currentIter) == 0 {
+		return nil
+	}
+
+	new := make([]ixparser.AssociatedAccount, 0)
+	for address, account := range a.currentIter {
+		_, ok := a.all[address]
+		if !ok {
+			new = append(new, account)
+			a.all[address] = account
+		}
+	}
+	a.currentIter = make(map[string]ixparser.AssociatedAccount)
+	return new
+}
+
+func syncAddress(
 	rpcClient *rpc.Client,
 	db *sql.DB,
 	q *dbgen.Queries,
-	walletAddress string,
+	walletAdress,
+	accountAddress string,
+	isAssociatedAccount bool,
+	associatedAccounts *AssociatedAccounts,
 ) {
-	slog.Info("running wallet sync", "walletAddress", walletAddress)
+	slog.Info("running address sync", "address", accountAddress)
 	l := uint64(1000)
 	getSignaturesConfig := rpc.GetSignaturesForAddressConfig{
 		Limit:      &l,
@@ -592,10 +681,10 @@ func SyncWallet(
 
 	for {
 		signaturesResults, err := forceRpcRequest(func() ([]*rpc.SignatureResult, error) {
-			return rpcClient.GetSignaturesForAddress(walletAddress, &getSignaturesConfig)
+			return rpcClient.GetSignaturesForAddress(accountAddress, &getSignaturesConfig)
 		}, 5)
 		assert.NoErr(err, "unable to fetch signatures")
-		slog.Info("fetched signatures for wallet", "signatures", len(signaturesResults))
+		slog.Info("fetched signatures for address", "signatures", len(signaturesResults))
 
 		if len(signaturesResults) == 0 {
 			break
@@ -607,10 +696,17 @@ func SyncWallet(
 		}
 		savedTransactions, err := q.FetchTransactions(context.Background(), signatures)
 		assert.NoErr(err, "unable to fetch saved transactions")
-		for _, tx := range savedTransactions {
-			deserializedSavedTx, err := deserializeSavedTransaction(tx)
-			assert.NoErr(err, "unable to deserialize saved tx", "tx", tx)
-			_ = ixparser.ParseTx(deserializedSavedTx)
+
+		if !isAssociatedAccount {
+			for _, tx := range savedTransactions {
+				deserializedSavedTx, err := deserializeSavedTransaction(tx)
+				assert.NoErr(err, "unable to deserialize saved tx", "tx", tx)
+
+				currentAssociatedAccounts, err := ixparser.ParseTx(deserializedSavedTx, walletAdress)
+				assert.NoErr(err, "unable to parse tx")
+				fmt.Printf("aas %#v\n", currentAssociatedAccounts)
+				maps.Insert(associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
+			}
 		}
 
 		insertableTransactions := make([]*insertableTransaction, 0)
@@ -630,7 +726,13 @@ func SyncWallet(
 			insertableTx, err := newInsertableTransaction(tx)
 			assert.NoErr(err, "unable to create insertable tx")
 
-			_ = ixparser.ParseTx(insertableTx)
+			currentAssociatedAccounts, err := ixparser.ParseTx(insertableTx, walletAdress)
+			assert.NoErr(err, "unable to parse tx")
+			fmt.Printf("aas %#v\n", currentAssociatedAccounts)
+
+			if !isAssociatedAccount {
+				maps.Insert(associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
+			}
 
 			insertableTransactions = append(insertableTransactions, insertableTx)
 		}
@@ -639,11 +741,32 @@ func SyncWallet(
 			err = insertTransactions(db, insertableTransactions)
 			assert.NoErr(err, "unable to insert transactions")
 		}
+		if insertableAccounts := associatedAccounts.Flush(); insertableAccounts != nil {
+			err = insertAssociatedAccounts(db, insertableAccounts)
+			assert.NoErr(err, "unable to insert associated accounts")
+		}
 
 		if len(signatures) < int(l) {
 			break
 		}
 		getSignaturesConfig.Before = signatures[0]
+	}
+}
+
+func SyncWallet(
+	rpcClient *rpc.Client,
+	db *sql.DB,
+	q *dbgen.Queries,
+	walletAddress string,
+) {
+	associatedAccounts := newAssociatedAccounts()
+
+	slog.Info("syncing wallet", "walletAddress", walletAddress)
+	syncAddress(rpcClient, db, q, walletAddress, walletAddress, false, associatedAccounts)
+
+	for address := range associatedAccounts.all {
+		slog.Info("syncing associated account", "address", address)
+		syncAddress(rpcClient, db, q, walletAddress, address, true, associatedAccounts)
 	}
 
 	err := fixTimestampDuplicates(rpcClient, db, q)
