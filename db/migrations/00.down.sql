@@ -20,4 +20,10 @@ DROP TABLE IF EXISTS transaction_log;
 
 DROP TABLE IF EXISTS transaction_account;
 
+DROP TABLE IF EXISTS transaction_to_wallet;
+
 DROP TABLE IF EXISTS "transaction";
+
+DROP TABLE IF EXISTS sync_request;
+
+DROP TABLE IF EXISTS wallet;

@@ -5,9 +5,7 @@ import (
 	"log/slog"
 )
 
-const (
-	associatedTokenProgramAddress = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
-)
+const associatedTokenProgramAddress = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 
 func parseAssociatedTokenIx(ix ParsableIx, walletAddress, signature string) (map[string]AssociatedAccount, error) {
 	data := ix.Data()
@@ -19,6 +17,7 @@ func parseAssociatedTokenIx(ix ParsableIx, walletAddress, signature string) (map
 		innerIxsLen := len(innerIxs)
 
 		if innerIxsLen == 0 {
+			ix.SetKnown()
 			return nil, nil
 		}
 
@@ -26,6 +25,7 @@ func parseAssociatedTokenIx(ix ParsableIx, walletAddress, signature string) (map
 		if len(accounts) < 3 {
 			return nil, errAccountsTooSmall
 		}
+		ix.SetKnown()
 
 		from := accounts[0]
 		to := accounts[1]

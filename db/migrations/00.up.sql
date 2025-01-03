@@ -1,3 +1,17 @@
+CREATE TABLE wallet (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL UNIQUE,
+    label TEXT,
+    last_signature TEXT
+);
+
+CREATE TABLE sync_request (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    wallet_id INTEGER NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (wallet_id) REFERENCES wallet (id) ON DELETE CASCADE
+);
+
 CREATE TABLE "transaction" (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     signature TEXT NOT NULL UNIQUE,
@@ -11,6 +25,15 @@ CREATE TABLE "transaction" (
 );
 
 CREATE INDEX transaction_signature ON "transaction" (signature);
+
+CREATE TABLE transaction_to_wallet (
+    wallet_id INTEGER NOT NULL,
+    transaction_id INTEGER NOT NULL,
+    --
+    PRIMARY KEY (wallet_id, transaction_id),
+    FOREIGN KEY (wallet_id) REFERENCES wallet (id) ON DELETE CASCADE,
+    FOREIGN KEY (transaction_id) REFERENCES "transaction" (id) ON DELETE CASCADE
+);
 
 CREATE TABLE transaction_account (
     transaction_id INTEGER NOT NULL,
@@ -34,6 +57,7 @@ CREATE TABLE instruction (
     transaction_id INTEGER NOT NULL,
     --
     idx INTEGER NOT NULL,
+    is_known BOOLEAN NOT NULL DEFAULT false,
     program_id_idx INTEGER NOT NULL,
     -- accounts ids stored as json array
     accounts_idxs TEXT NOT NULL,
@@ -78,6 +102,7 @@ CREATE TABLE event (
 
 CREATE TABLE associated_account (
     address TEXT NOT NULL,
+    last_signature TEXT,
     --
     -- 0 -> token account
     type INTEGER NOT NULL,
@@ -93,7 +118,9 @@ SELECT
 FROM
     transaction_account
 GROUP BY
-    transaction_id;
+    transaction_id
+ORDER BY
+    idx ASC;
 
 CREATE VIEW v_transaction_logs AS
 SELECT
@@ -116,19 +143,21 @@ FROM
     JOIN transaction_account ta ON ta.transaction_id = iix.transaction_id
     AND ta.idx = iix.program_id_idx
 ORDER BY
-    iix.idx;
+    iix.idx ASC;
 
 CREATE VIEW v_instruction AS
 SELECT
     ix.transaction_id,
+    ix.is_known,
+    ix.idx,
     ta.address AS program_address,
     ix.accounts_idxs,
     ix.data,
     COALESCE(
-        nullif(
-            json_group_array (
-                CASE
-                    WHEN iix.transaction_id IS NOT NULL THEN json_object (
+        (
+            SELECT
+                json_group_array (
+                    json_object (
                         'program_address',
                         iix.program_address,
                         'accounts_idxs',
@@ -136,9 +165,12 @@ SELECT
                         'data',
                         iix.data
                     )
-                END
-            ),
-            '[null]'
+                )
+            FROM
+                v_inner_instruction iix
+            WHERE
+                iix.transaction_id = ix.transaction_id
+                AND iix.ix_idx = ix.idx
         ),
         '[]'
     ) AS inner_ixs
@@ -146,12 +178,8 @@ FROM
     instruction ix
     JOIN transaction_account ta ON ta.transaction_id = ix.transaction_id
     AND ta.idx = ix.program_id_idx
-    LEFT JOIN v_inner_instruction iix ON iix.transaction_id = ix.transaction_id
-    AND iix.ix_idx = ix.idx
 GROUP BY
     ix.transaction_id,
-    ix.idx
-ORDER BY
     ix.idx;
 
 CREATE VIEW v_transaction AS
@@ -161,10 +189,10 @@ SELECT
     ta.addresses AS accounts,
     tl.logs AS logs,
     COALESCE(
-        nullif(
-            json_group_array (
-                CASE
-                    WHEN ix.transaction_id IS NOT NULL THEN json_object (
+        (
+            SELECT
+                json_group_array (
+                    json_object (
                         'program_address',
                         ix.program_address,
                         'accounts_idxs',
@@ -174,9 +202,13 @@ SELECT
                         'inner_ixs',
                         ix.inner_ixs
                     )
-                END
-            ),
-            '[null]'
+                )
+            FROM
+                v_instruction ix
+            WHERE
+                ix.transaction_id = t.id
+            ORDER BY
+                ix.idx ASC
         ),
         '[]'
     ) AS instructions
@@ -184,6 +216,5 @@ FROM
     "transaction" t
     LEFT JOIN v_transaction_accounts ta ON ta.transaction_id = t.id
     LEFT JOIN v_transaction_logs tl ON tl.transaction_id = t.id
-    LEFT JOIN v_instruction ix ON ix.transaction_id = t.id
 GROUP BY
     t.id;

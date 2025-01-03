@@ -2,7 +2,6 @@ package ixparser
 
 import (
 	"encoding/binary"
-	"fmt"
 )
 
 const (
@@ -48,6 +47,7 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 		}
 
 		amount := binary.LittleEndian.Uint64(data)
+		ix.SetKnown()
 		ix.AddEvent(&EventTransfer{
 			ProgramAddress: tokenProgramAddress,
 			IsRent:         false,
@@ -64,6 +64,7 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 			return nil, errDataTooSmall
 		}
 		amount := binary.LittleEndian.Uint64(data)
+		ix.SetKnown()
 		ix.AddEvent(&EventTransfer{
 			ProgramAddress: tokenProgramAddress,
 			IsRent:         false,
@@ -82,6 +83,7 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 			return nil, errDataTooSmall
 		}
 		amount := binary.LittleEndian.Uint64(data)
+		ix.SetKnown()
 		ix.AddEvent(&EventMint{
 			ProgramAddress: tokenProgramAddress,
 			To:             accounts[1],
@@ -98,6 +100,7 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 			return nil, errDataTooSmall
 		}
 		amount := binary.LittleEndian.Uint64(data)
+		ix.SetKnown()
 		ix.AddEvent(&EventBurn{
 			ProgramAddress: tokenProgramAddress,
 			From:           accounts[0],
@@ -108,6 +111,7 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 		if err != nil {
 			return nil, err
 		}
+		ix.SetKnown()
 		ix.AddEvent(&EventCloseAccount{
 			ProgramAddress: tokenProgramAddress,
 			From:           from,
@@ -118,14 +122,16 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 	case ixTokenInitAccount2:
 		fallthrough
 	case ixTokenInitAccount:
-		fmt.Println("INIT ACCOUNT")
 		accountAddress, mint, err := getFromToAccounts(0, 1, 2, ix.AccountsAddresses())
 		if err != nil {
 			return nil, err
 		}
 		accounts := make(map[string]AssociatedAccount)
 		accounts[accountAddress] = &AssociatedAccountToken{address: accountAddress, mint: mint}
+		ix.SetKnown()
 		return accounts, nil
+	default:
+		ix.SetKnown()
 	}
 
 	return nil, nil

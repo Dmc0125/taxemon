@@ -8,11 +8,19 @@ import (
 	"database/sql"
 )
 
+type AssociatedAccount struct {
+	Address       string         `db:"address" json:"address"`
+	LastSignature sql.NullString `db:"last_signature" json:"last_signature"`
+	Type          int64          `db:"type" json:"type"`
+	Data          sql.NullString `db:"data" json:"data"`
+}
+
 type Event struct {
 	TransactionID int64  `db:"transaction_id" json:"transaction_id"`
 	IxIdx         int64  `db:"ix_idx" json:"ix_idx"`
+	Idx           int64  `db:"idx" json:"idx"`
 	Type          int64  `db:"type" json:"type"`
-	Data          []byte `db:"data" json:"data"`
+	Data          string `db:"data" json:"data"`
 }
 
 type InnerInstruction struct {
@@ -27,9 +35,16 @@ type InnerInstruction struct {
 type Instruction struct {
 	TransactionID int64  `db:"transaction_id" json:"transaction_id"`
 	Idx           int64  `db:"idx" json:"idx"`
+	IsKnown       bool   `db:"is_known" json:"is_known"`
 	ProgramIDIdx  int64  `db:"program_id_idx" json:"program_id_idx"`
 	AccountsIdxs  string `db:"accounts_idxs" json:"accounts_idxs"`
 	Data          string `db:"data" json:"data"`
+}
+
+type SyncRequest struct {
+	ID        int64 `db:"id" json:"id"`
+	WalletID  int64 `db:"wallet_id" json:"wallet_id"`
+	CreatedAt int64 `db:"created_at" json:"created_at"`
 }
 
 type Transaction struct {
@@ -54,6 +69,11 @@ type TransactionLog struct {
 	Log           string `db:"log" json:"log"`
 }
 
+type TransactionToWallet struct {
+	WalletID      int64 `db:"wallet_id" json:"wallet_id"`
+	TransactionID int64 `db:"transaction_id" json:"transaction_id"`
+}
+
 type VInnerInstruction struct {
 	TransactionID  int64  `db:"transaction_id" json:"transaction_id"`
 	IxIdx          int64  `db:"ix_idx" json:"ix_idx"`
@@ -64,6 +84,8 @@ type VInnerInstruction struct {
 
 type VInstruction struct {
 	TransactionID  int64       `db:"transaction_id" json:"transaction_id"`
+	IsKnown        bool        `db:"is_known" json:"is_known"`
+	Idx            int64       `db:"idx" json:"idx"`
 	ProgramAddress string      `db:"program_address" json:"program_address"`
 	AccountsIdxs   string      `db:"accounts_idxs" json:"accounts_idxs"`
 	Data           string      `db:"data" json:"data"`
@@ -86,4 +108,11 @@ type VTransactionAccount struct {
 type VTransactionLog struct {
 	TransactionID int64       `db:"transaction_id" json:"transaction_id"`
 	Logs          interface{} `db:"logs" json:"logs"`
+}
+
+type Wallet struct {
+	ID            int64          `db:"id" json:"id"`
+	Address       string         `db:"address" json:"address"`
+	Label         sql.NullString `db:"label" json:"label"`
+	LastSignature sql.NullString `db:"last_signature" json:"last_signature"`
 }

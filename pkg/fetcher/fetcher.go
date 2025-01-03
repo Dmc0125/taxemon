@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"taxemon/pkg/dbgen"
 	ixparser "taxemon/pkg/ix_parser"
 	"taxemon/pkg/rpc"
+	"time"
 
 	"github.com/mr-tron/base58"
 	"golang.org/x/sync/errgroup"
@@ -95,6 +97,7 @@ type insertableInstruction struct {
 	*insertableInstructionBase
 	innerInstructions []*insertableInstructionBase
 	events            []ixparser.Event
+	isKnown           bool
 }
 
 func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
@@ -107,6 +110,10 @@ func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
 
 func (ix *insertableInstruction) AddEvent(event ixparser.Event) {
 	ix.events = append(ix.events, event)
+}
+
+func (ix *insertableInstruction) SetKnown() {
+	ix.isKnown = true
 }
 
 type insertableTransaction struct {
@@ -255,24 +262,24 @@ type insertedTransaction struct {
 	Id        int64
 }
 
-func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
+func insertTransactions(db *sql.DB, txs []*insertableTransaction) ([]*insertedTransaction, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 
 	txsPreparedQuery := prepareInsertTransactionsQuery(txs)
 	rows, err := tx.Query(txsPreparedQuery.string(), txsPreparedQuery.args...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	insertedTxs := make([]*insertedTransaction, 0)
 	for rows.Next() {
 		t := new(insertedTransaction)
 		if err = rows.Scan(&t.Signature, &t.Id); err != nil {
-			return err
+			return nil, err
 		}
 		insertedTxs = append(insertedTxs, t)
 	}
@@ -286,7 +293,7 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 		"",
 	)
 	ixsPreparedQuery := newPreparedQuery(
-		"INSERT INTO instruction (transaction_id, idx, program_id_idx, accounts_idxs, data) VALUES",
+		"INSERT INTO instruction (transaction_id, idx, is_known, program_id_idx, accounts_idxs, data) VALUES",
 		"",
 	)
 	innerIxsPreparedQuery := newPreparedQuery(
@@ -303,7 +310,7 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 			return itx.Signature == tx.signature
 		})
 		if txIdIdx == -1 {
-			return fmt.Errorf("unable to find inserted tx")
+			return nil, fmt.Errorf("unable to find inserted tx")
 		}
 		txId := insertedTxs[txIdIdx].Id
 
@@ -318,17 +325,17 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 		for ixIdx, ix := range tx.ixs {
 			ixAccountsIdxs, err := json.Marshal(ix.accountsIndexes)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			ixData := hex.EncodeToString(ix.data)
 
-			ixsPreparedQuery.placeholders = append(ixsPreparedQuery.placeholders, "(?, ?, ?, ?, ?)")
-			ixsPreparedQuery.args = append(ixsPreparedQuery.args, txId, ixIdx, ix.programIdIdx, string(ixAccountsIdxs), ixData)
+			ixsPreparedQuery.placeholders = append(ixsPreparedQuery.placeholders, "(?, ?, ?, ?, ?, ?)")
+			ixsPreparedQuery.args = append(ixsPreparedQuery.args, txId, ixIdx, ix.isKnown, ix.programIdIdx, string(ixAccountsIdxs), ixData)
 
 			for innerIxIdx, innerIx := range ix.innerInstructions {
 				iixAccountsIdxs, err := json.Marshal(innerIx.accountsIndexes)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				innerIxData := hex.EncodeToString(innerIx.data)
 
@@ -347,7 +354,7 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 			for eventIdx, event := range ix.events {
 				eventSerialized, err := json.Marshal(event)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				eventsPreparedQuery.placeholders = append(eventsPreparedQuery.placeholders, "(?, ?, ?, ?, ?)")
 				eventsPreparedQuery.args = append(eventsPreparedQuery.args, txId, ixIdx, eventIdx, event.Type(), string(eventSerialized))
@@ -389,14 +396,14 @@ func insertTransactions(db *sql.DB, txs []*insertableTransaction) error {
 		})
 	}
 	if err = eg.Wait(); err != nil {
-		return err
+		return nil, err
 	}
 
 	err = tx.Commit()
-	return err
+	return insertedTxs, err
 }
 
-func insertAssociatedAccounts(db *sql.DB, associatedAccounts []ixparser.AssociatedAccount) error {
+func insertAssociatedAccounts(db dbgen.DBTX, associatedAccounts []ixparser.AssociatedAccount) error {
 	q := newPreparedQuery("INSERT INTO associated_account (address, type, data) VALUES", "")
 	for _, account := range associatedAccounts {
 		data, err := account.Data()
@@ -407,7 +414,7 @@ func insertAssociatedAccounts(db *sql.DB, associatedAccounts []ixparser.Associat
 		q.placeholders = append(q.placeholders, "(?, ?, ?)")
 		q.args = append(q.args, account.Address(), account.Type(), string(data))
 	}
-	_, err := db.Exec(q.string(), q.args...)
+	_, err := db.ExecContext(context.Background(), q.string(), q.args...)
 	return err
 }
 
@@ -443,6 +450,8 @@ func (ix *savedInstruction) InnerIxs() []ixparser.ParsableIxBase {
 }
 
 func (ix *savedInstruction) AddEvent(_ ixparser.Event) {}
+
+func (ix *savedInstruction) SetKnown() {}
 
 type savedTransaction struct {
 	signature    string
@@ -493,7 +502,7 @@ func deserializeIxAccountsAndData(
 	return accountsAddresses, ixData, nil
 }
 
-func deserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, error) {
+func DeserializeSavedTransaction(tx *dbgen.VTransaction) (*savedTransaction, error) {
 	var txAccounts []string
 	if tx.Accounts != nil {
 		if err := json.Unmarshal([]byte(tx.Accounts.(string)), &txAccounts); err != nil {
@@ -635,18 +644,28 @@ func fixTimestampDuplicates(rpcClient *rpc.Client, db *sql.DB, q *dbgen.Queries)
 
 type AssociatedAccounts struct {
 	currentIter map[string]ixparser.AssociatedAccount
-	all         map[string]ixparser.AssociatedAccount
+	all         map[string]string
 }
 
 func newAssociatedAccounts() *AssociatedAccounts {
 	return &AssociatedAccounts{
 		currentIter: make(map[string]ixparser.AssociatedAccount),
-		all:         make(map[string]ixparser.AssociatedAccount),
+		all:         make(map[string]string),
 	}
 }
 
-func (a *AssociatedAccounts) Flush() []ixparser.AssociatedAccount {
-	fmt.Printf("associated accounts %#v", a.currentIter)
+func (a *AssociatedAccounts) init(q *dbgen.Queries) error {
+	associatedAccounts, err := q.FetchAssociatedAccounts(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, aa := range associatedAccounts {
+		a.all[aa.Address] = aa.LastSignature.String
+	}
+	return nil
+}
+
+func (a *AssociatedAccounts) flush() []ixparser.AssociatedAccount {
 	if len(a.currentIter) == 0 {
 		return nil
 	}
@@ -656,119 +675,259 @@ func (a *AssociatedAccounts) Flush() []ixparser.AssociatedAccount {
 		_, ok := a.all[address]
 		if !ok {
 			new = append(new, account)
-			a.all[address] = account
+			a.all[address] = ""
 		}
 	}
 	a.currentIter = make(map[string]ixparser.AssociatedAccount)
 	return new
 }
 
+type Fetcher struct {
+	rpcClient *rpc.Client
+	q         *dbgen.Queries
+	config    *rpc.GetSignaturesForAddressConfig
+
+	associatedAccounts *AssociatedAccounts
+	address            string
+	latestSignature    string
+}
+
+func newFetcher(
+	rpcClient *rpc.Client,
+	q *dbgen.Queries,
+	associatedAccounts *AssociatedAccounts,
+	address, lastSignature string,
+) *Fetcher {
+	l := uint64(1000)
+	c := &rpc.GetSignaturesForAddressConfig{
+		Limit:      &l,
+		Commitment: rpc.CommitmentConfirmed,
+	}
+	if len(lastSignature) > 0 {
+		c.After = lastSignature
+	}
+	return &Fetcher{
+		rpcClient:          rpcClient,
+		q:                  q,
+		config:             c,
+		associatedAccounts: associatedAccounts,
+		address:            address,
+	}
+}
+
+func (f *Fetcher) fetchNext() (bool, []*insertableTransaction) {
+	signaturesResults, err := forceRpcRequest(func() ([]*rpc.SignatureResult, error) {
+		return f.rpcClient.GetSignaturesForAddress(f.address, f.config)
+	}, 5)
+	assert.NoErr(err, "unable to fetch signatures")
+	slog.Info("fetched signatures for address", "signatures", len(signaturesResults))
+
+	if len(signaturesResults) == 0 {
+		return false, nil
+	}
+	if f.latestSignature == "" {
+		f.latestSignature = signaturesResults[0].Signature
+	}
+
+	signatures := make([]string, len(signaturesResults))
+	for i, sr := range signaturesResults {
+		signatures[i] = sr.Signature
+	}
+	savedTransactions, err := f.q.FetchTransactions(context.Background(), signatures)
+	assert.NoErr(err, "unable to fetch saved transactions")
+
+	if f.associatedAccounts != nil {
+		slog.Info("should not run")
+		for _, tx := range savedTransactions {
+			deserializedSavedTx, err := DeserializeSavedTransaction(tx)
+			assert.NoErr(err, "unable to deserialize saved tx", "tx", tx)
+
+			currentAssociatedAccounts, err := ixparser.ParseTx(deserializedSavedTx, f.address)
+			assert.NoErr(err, "unable to parse tx")
+			maps.Insert(f.associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
+		}
+	}
+
+	insertableTransactions := make([]*insertableTransaction, 0)
+	for _, sr := range signaturesResults {
+		if txIdx := slices.IndexFunc(savedTransactions, func(tx *dbgen.VTransaction) bool {
+			return tx.Signature == sr.Signature
+		}); txIdx > -1 {
+			continue
+		}
+
+		slog.Info("fetching tx", "signature", sr.Signature)
+		tx, err := forceRpcRequest(func() (*rpc.ParsedTransactionResult, error) {
+			return f.rpcClient.GetTransaction(sr.Signature, rpc.CommitmentConfirmed)
+		}, 5)
+		assert.NoErr(err, "unable to get transaction")
+
+		insertableTx, err := newInsertableTransaction(tx)
+		assert.NoErr(err, "unable to create insertable tx")
+
+		currentAssociatedAccounts, err := ixparser.ParseTx(insertableTx, f.address)
+		assert.NoErr(err, "unable to parse tx")
+
+		if f.associatedAccounts != nil {
+			maps.Insert(f.associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
+		}
+
+		insertableTransactions = append(insertableTransactions, insertableTx)
+	}
+
+	f.config.Before = signatures[len(signatures)-1]
+	hasNext := len(signaturesResults) == int(*f.config.Limit)
+
+	return hasNext, insertableTransactions
+}
+
+func insertTransactionsToWallet(db dbgen.DBTX, walletId int64, txs []*insertedTransaction) error {
+	q := newPreparedQuery("INSERT INTO transaction_to_wallet (wallet_id, transaction_id) VALUES", "ON CONFLICT (wallet_id, transaction_id) DO NOTHING")
+	for _, tx := range txs {
+		q.placeholders = append(q.placeholders, "(?, ?)")
+		q.args = append(q.args, walletId, tx.Id)
+	}
+	_, err := db.ExecContext(context.Background(), q.string(), q.args...)
+	return err
+}
+
 func syncAddress(
 	rpcClient *rpc.Client,
 	db *sql.DB,
 	q *dbgen.Queries,
-	walletAdress,
-	accountAddress string,
-	isAssociatedAccount bool,
 	associatedAccounts *AssociatedAccounts,
-) {
-	slog.Info("running address sync", "address", accountAddress)
-	l := uint64(1000)
-	getSignaturesConfig := rpc.GetSignaturesForAddressConfig{
-		Limit:      &l,
-		Commitment: rpc.CommitmentConfirmed,
-	}
+	walletId int64,
+	address string,
+	lastSignature string,
+) error {
+	slog.Info("running address sync", "address", address)
+	fetcher := newFetcher(rpcClient, q, associatedAccounts, address, lastSignature)
 
 	for {
-		signaturesResults, err := forceRpcRequest(func() ([]*rpc.SignatureResult, error) {
-			return rpcClient.GetSignaturesForAddress(accountAddress, &getSignaturesConfig)
-		}, 5)
-		assert.NoErr(err, "unable to fetch signatures")
-		slog.Info("fetched signatures for address", "signatures", len(signaturesResults))
-
-		if len(signaturesResults) == 0 {
+		hasNext, insertableTransactions := fetcher.fetchNext()
+		if insertableTransactions == nil {
 			break
-		}
-
-		signatures := make([]string, len(signaturesResults))
-		for i, sr := range signaturesResults {
-			signatures[i] = sr.Signature
-		}
-		savedTransactions, err := q.FetchTransactions(context.Background(), signatures)
-		assert.NoErr(err, "unable to fetch saved transactions")
-
-		if !isAssociatedAccount {
-			for _, tx := range savedTransactions {
-				deserializedSavedTx, err := deserializeSavedTransaction(tx)
-				assert.NoErr(err, "unable to deserialize saved tx", "tx", tx)
-
-				currentAssociatedAccounts, err := ixparser.ParseTx(deserializedSavedTx, walletAdress)
-				assert.NoErr(err, "unable to parse tx")
-				fmt.Printf("aas %#v\n", currentAssociatedAccounts)
-				maps.Insert(associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
-			}
-		}
-
-		insertableTransactions := make([]*insertableTransaction, 0)
-		for _, sr := range signaturesResults {
-			if txIdx := slices.IndexFunc(savedTransactions, func(tx *dbgen.VTransaction) bool {
-				return tx.Signature == sr.Signature
-			}); txIdx > -1 {
-				continue
-			}
-
-			slog.Info("fetching tx", "signature", sr.Signature)
-			tx, err := forceRpcRequest(func() (*rpc.ParsedTransactionResult, error) {
-				return rpcClient.GetTransaction(sr.Signature, rpc.CommitmentConfirmed)
-			}, 5)
-			assert.NoErr(err, "unable to get transaction")
-
-			insertableTx, err := newInsertableTransaction(tx)
-			assert.NoErr(err, "unable to create insertable tx")
-
-			currentAssociatedAccounts, err := ixparser.ParseTx(insertableTx, walletAdress)
-			assert.NoErr(err, "unable to parse tx")
-			fmt.Printf("aas %#v\n", currentAssociatedAccounts)
-
-			if !isAssociatedAccount {
-				maps.Insert(associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
-			}
-
-			insertableTransactions = append(insertableTransactions, insertableTx)
 		}
 
 		if len(insertableTransactions) > 0 {
-			err = insertTransactions(db, insertableTransactions)
-			assert.NoErr(err, "unable to insert transactions")
-		}
-		if insertableAccounts := associatedAccounts.Flush(); insertableAccounts != nil {
-			err = insertAssociatedAccounts(db, insertableAccounts)
-			assert.NoErr(err, "unable to insert associated accounts")
+			slog.Info("inserting transactions")
+			insertedTxs, err := insertTransactions(db, insertableTransactions)
+			if err != nil {
+				return err
+			}
+
+			tx, err := db.Begin()
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+
+			if associatedAccounts != nil {
+				insertableAccounts := associatedAccounts.flush()
+				if insertableAccounts != nil {
+					slog.Info("inserting associated accounts")
+					err = insertAssociatedAccounts(tx, insertableAccounts)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			slog.Info("inserting transactions to wallet")
+			if err = insertTransactionsToWallet(tx, walletId, insertedTxs); err != nil {
+				return err
+			}
+
+			err = tx.Commit()
+			if err != nil {
+				return err
+			}
 		}
 
-		if len(signatures) < int(l) {
+		if !hasNext {
 			break
 		}
-		getSignaturesConfig.Before = signatures[0]
 	}
+
+	if associatedAccounts != nil && fetcher.latestSignature != "" {
+		slog.Info("setting last signature")
+		return q.SetWalletLastSignature(context.Background(), &dbgen.SetWalletLastSignatureParams{
+			Signature: sql.NullString{
+				Valid:  true,
+				String: fetcher.latestSignature,
+			},
+			Address: address,
+		})
+	} else if fetcher.latestSignature != "" {
+		slog.Info("setting last signature")
+		return q.SetAssociatedAccountLastSignature(context.Background(), &dbgen.SetAssociatedAccountLastSignatureParams{
+			Signature: sql.NullString{
+				Valid:  true,
+				String: fetcher.latestSignature,
+			},
+			Address: address,
+		})
+	}
+
+	return nil
 }
 
 func SyncWallet(
 	rpcClient *rpc.Client,
 	db *sql.DB,
 	q *dbgen.Queries,
+	walletId int64,
 	walletAddress string,
-) {
+	lastSigature string,
+) error {
 	associatedAccounts := newAssociatedAccounts()
+	associatedAccounts.init(q)
 
 	slog.Info("syncing wallet", "walletAddress", walletAddress)
-	syncAddress(rpcClient, db, q, walletAddress, walletAddress, false, associatedAccounts)
-
-	for address := range associatedAccounts.all {
-		slog.Info("syncing associated account", "address", address)
-		syncAddress(rpcClient, db, q, walletAddress, address, true, associatedAccounts)
+	err := syncAddress(rpcClient, db, q, associatedAccounts, walletId, walletAddress, lastSigature)
+	if err != nil {
+		return err
 	}
 
-	err := fixTimestampDuplicates(rpcClient, db, q)
-	assert.NoErr(err, "unbale to fix timestamps duplicates")
+	for address, lastSignature := range associatedAccounts.all {
+		slog.Info("syncing associated account", "address", address)
+		err = syncAddress(rpcClient, db, q, nil, walletId, address, lastSignature)
+		if err != nil {
+			return err
+		}
+	}
+
+	return fixTimestampDuplicates(rpcClient, db, q)
+}
+
+func Start(
+	rpcClient *rpc.Client,
+	db *sql.DB,
+	q *dbgen.Queries,
+) error {
+	ticker := time.NewTicker(5 * time.Second)
+
+outer:
+	for {
+		select {
+		case <-ticker.C:
+			syncRequest, err := q.GetLatestSyncRequest(context.Background())
+			if errors.Is(err, sql.ErrNoRows) {
+				continue outer
+			}
+			if err != nil {
+				return err
+			}
+
+			if err = SyncWallet(
+				rpcClient,
+				db,
+				q,
+				syncRequest.WalletID,
+				syncRequest.Address,
+				syncRequest.LastSignature.String,
+			); err != nil {
+				return err
+			}
+		}
+	}
 }

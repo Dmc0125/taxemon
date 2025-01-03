@@ -7,8 +7,45 @@ package dbgen
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 )
+
+const fetchAssociatedAccounts = `-- name: FetchAssociatedAccounts :many
+SELECT
+    address,
+    last_signature
+FROM
+    associated_account
+`
+
+type FetchAssociatedAccountsRow struct {
+	Address       string         `db:"address" json:"address"`
+	LastSignature sql.NullString `db:"last_signature" json:"last_signature"`
+}
+
+func (q *Queries) FetchAssociatedAccounts(ctx context.Context) ([]*FetchAssociatedAccountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, fetchAssociatedAccounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*FetchAssociatedAccountsRow
+	for rows.Next() {
+		var i FetchAssociatedAccountsRow
+		if err := rows.Scan(&i.Address, &i.LastSignature); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
 
 const fetchDuplicateTimestampsTransactions = `-- name: FetchDuplicateTimestampsTransactions :many
 SELECT
@@ -102,4 +139,142 @@ func (q *Queries) FetchTransactions(ctx context.Context, signatures []string) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const fetchUnknownTransactions = `-- name: FetchUnknownTransactions :many
+SELECT DISTINCT
+    v.signature, v.id, v.accounts, v.logs, v.instructions
+FROM
+    v_transaction v
+    JOIN instruction i ON i.transaction_id = v.id
+WHERE
+    i.is_known = true
+`
+
+func (q *Queries) FetchUnknownTransactions(ctx context.Context) ([]*VTransaction, error) {
+	rows, err := q.db.QueryContext(ctx, fetchUnknownTransactions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*VTransaction
+	for rows.Next() {
+		var i VTransaction
+		if err := rows.Scan(
+			&i.Signature,
+			&i.ID,
+			&i.Accounts,
+			&i.Logs,
+			&i.Instructions,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getLatestSyncRequest = `-- name: GetLatestSyncRequest :one
+SELECT
+    sync_request.wallet_id,
+    wallet.address,
+    wallet.last_signature
+FROM
+    sync_request
+    JOIN wallet ON wallet.id = sync_request.wallet_id
+ORDER BY
+    sync_request.created_at
+LIMIT
+    1
+`
+
+type GetLatestSyncRequestRow struct {
+	WalletID      int64          `db:"wallet_id" json:"wallet_id"`
+	Address       string         `db:"address" json:"address"`
+	LastSignature sql.NullString `db:"last_signature" json:"last_signature"`
+}
+
+func (q *Queries) GetLatestSyncRequest(ctx context.Context) (*GetLatestSyncRequestRow, error) {
+	row := q.db.QueryRowContext(ctx, getLatestSyncRequest)
+	var i GetLatestSyncRequestRow
+	err := row.Scan(&i.WalletID, &i.Address, &i.LastSignature)
+	return &i, err
+}
+
+const insertSyncRequest = `-- name: InsertSyncRequest :exec
+INSERT INTO
+    sync_request (wallet_id, created_at)
+VALUES
+    (?1, ?2)
+`
+
+type InsertSyncRequestParams struct {
+	WalletID  int64 `db:"wallet_id" json:"wallet_id"`
+	CreatedAt int64 `db:"created_at" json:"created_at"`
+}
+
+func (q *Queries) InsertSyncRequest(ctx context.Context, arg *InsertSyncRequestParams) error {
+	_, err := q.db.ExecContext(ctx, insertSyncRequest, arg.WalletID, arg.CreatedAt)
+	return err
+}
+
+const insertWallet = `-- name: InsertWallet :one
+INSERT INTO
+    wallet (address, label)
+VALUES
+    (?1, ?2) RETURNING id
+`
+
+type InsertWalletParams struct {
+	Address string         `db:"address" json:"address"`
+	Label   sql.NullString `db:"label" json:"label"`
+}
+
+func (q *Queries) InsertWallet(ctx context.Context, arg *InsertWalletParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, insertWallet, arg.Address, arg.Label)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const setAssociatedAccountLastSignature = `-- name: SetAssociatedAccountLastSignature :exec
+UPDATE associated_account
+SET
+    last_signature = ?1
+WHERE
+    address = ?2
+`
+
+type SetAssociatedAccountLastSignatureParams struct {
+	Signature sql.NullString `db:"signature" json:"signature"`
+	Address   string         `db:"address" json:"address"`
+}
+
+func (q *Queries) SetAssociatedAccountLastSignature(ctx context.Context, arg *SetAssociatedAccountLastSignatureParams) error {
+	_, err := q.db.ExecContext(ctx, setAssociatedAccountLastSignature, arg.Signature, arg.Address)
+	return err
+}
+
+const setWalletLastSignature = `-- name: SetWalletLastSignature :exec
+UPDATE wallet
+SET
+    last_signature = ?1
+WHERE
+    address = ?2
+`
+
+type SetWalletLastSignatureParams struct {
+	Signature sql.NullString `db:"signature" json:"signature"`
+	Address   string         `db:"address" json:"address"`
+}
+
+func (q *Queries) SetWalletLastSignature(ctx context.Context, arg *SetWalletLastSignatureParams) error {
+	_, err := q.db.ExecContext(ctx, setWalletLastSignature, arg.Signature, arg.Address)
+	return err
 }

@@ -122,7 +122,7 @@ type ResponseGetSignaturesForAddress struct {
 type GetSignaturesForAddressConfig struct {
 	Limit      *uint64    `json:"limit"`
 	Before     string     `json:"before"`
-	After      string     `json:"after"`
+	After      string     `json:"until"`
 	Commitment Commitment `json:"commitment"`
 }
 

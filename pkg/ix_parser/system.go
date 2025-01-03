@@ -111,6 +111,7 @@ func parseSystemIx(ix ParsableIx) error {
 		}
 	}
 
+	ix.SetKnown()
 	if ev != nil {
 		ix.AddEvent(ev)
 	}

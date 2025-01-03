@@ -2,7 +2,6 @@ package ixparser
 
 import (
 	"errors"
-	"fmt"
 	"iter"
 	"maps"
 )
@@ -26,6 +25,7 @@ type ParsableIx interface {
 	ParsableIxBase
 	InnerIxs() []ParsableIxBase
 	AddEvent(Event)
+	SetKnown()
 }
 
 type ParsableTx interface {
@@ -55,8 +55,6 @@ func ParseTx(tx ParsableTx, walletAddress string) (map[string]AssociatedAccount,
 		case associatedTokenProgramAddress:
 			currentAssociatedAccounts, err = parseAssociatedTokenIx(ix, walletAddress, tx.Signature())
 		}
-
-		fmt.Printf("aas ix %#v\n", currentAssociatedAccounts)
 
 		if err != nil {
 			return nil, err
