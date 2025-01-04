@@ -1,12 +1,8 @@
 DROP VIEW IF EXISTS v_transaction;
 
-DROP VIEW IF EXISTS v_instruction;
+DROP FUNCTION IF EXISTS get_instructions;
 
-DROP VIEW IF EXISTS v_inner_instruction;
-
-DROP VIEW IF EXISTS v_transaction_accounts;
-
-DROP VIEW IF EXISTS v_transaction_logs;
+DROP FUNCTION IF EXISTS get_inner_instructions;
 
 DROP TABLE IF EXISTS associated_account;
 
@@ -25,5 +21,7 @@ DROP TABLE IF EXISTS transaction_to_wallet;
 DROP TABLE IF EXISTS "transaction";
 
 DROP TABLE IF EXISTS sync_request;
+
+DROP TYPE IF EXISTS sync_request_status;
 
 DROP TABLE IF EXISTS wallet;

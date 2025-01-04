@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"flag"
 	"fmt"
 	"os"
@@ -11,8 +10,9 @@ import (
 	"taxemon/pkg/assert"
 	"taxemon/pkg/logger"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
-	_ "modernc.org/sqlite"
+	_ "github.com/lib/pq"
 )
 
 func getProjectDir() string {
@@ -25,29 +25,15 @@ func getProjectDir() string {
 	return projectDir
 }
 
-func execFile(queries []string, db *sql.DB) {
-	tx, err := db.Begin()
-	assert.NoErr(err, "unable to begin tx")
-	defer tx.Rollback()
-
-	for _, q := range queries {
-		_, err := tx.Exec(fmt.Sprintf("%s;", q))
-		assert.NoErr(err, "unable to exec query", "query", q)
-	}
-
-	err = tx.Commit()
-	assert.NoErr(err, "unable to commit file")
-}
-
 func main() {
 	err := godotenv.Load()
 	assert.NoErr(err, "unable to load .env")
 
 	logger.NewPrettyLogger("", -4)
 
-	dbPath := os.Getenv("DB_PATH")
-	assert.NoEmptyStr(dbPath, "Missing DB_PATH")
-	db, err := sql.Open("sqlite", dbPath)
+	dbUrl := os.Getenv("DB_URL")
+	assert.NoEmptyStr(dbUrl, "Missing DB_PATH")
+	db, err := sqlx.Connect("postgres", dbUrl)
 	assert.NoErr(err, "unable to open sqlite connection")
 
 	var dir string
@@ -76,9 +62,11 @@ func main() {
 
 		bytes, err := os.ReadFile(path.Join(migrationsDir, n))
 		assert.NoErr(err, "unable to read file")
-		queries := strings.Split(string(bytes), ";")
 
-		execFile(queries, db)
+		q := string(bytes)
+		_, err = db.Exec(q)
+		assert.NoErr(err, "unable to exec query", "query", q)
+
 		fmt.Printf("Successfully executed migration %s %s\n", dir, n)
 	}
 }
