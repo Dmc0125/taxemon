@@ -3,7 +3,7 @@ package ixparser
 import (
 	"errors"
 	"iter"
-	"maps"
+	"slices"
 )
 
 var (
@@ -25,7 +25,6 @@ type ParsableIx interface {
 	ParsableIxBase
 	InnerIxs() []ParsableIxBase
 	AddEvent(Event)
-	SetKnown()
 }
 
 type ParsableTx interface {
@@ -40,29 +39,61 @@ type AssociatedAccount interface {
 	Data() ([]byte, error)
 }
 
-func ParseTx(tx ParsableTx, walletAddress string) (map[string]AssociatedAccount, error) {
-	associatedAccounts := make(map[string]AssociatedAccount, 0)
+type AssociatedAccounts interface {
+	Append(AssociatedAccount)
+}
 
+const (
+	computeBudgetProgramAddress = "ComputeBudget111111111111111111111111111111"
+)
+
+func ParseAssociatedAccounts(associatedAccounts AssociatedAccounts, tx ParsableTx, walletAddress string) error {
 	for _, ix := range tx.Instructions() {
 		var err error
-		var currentAssociatedAccounts map[string]AssociatedAccount
-
 		switch ix.ProgramAddress() {
-		case systomProgramAddress:
-			err = parseSystemIx(ix)
 		case tokenProgramAddress:
-			currentAssociatedAccounts, err = parseTokenIx(ix)
+			err = parseTokenIxAssociatedAccounts(associatedAccounts, ix)
 		case associatedTokenProgramAddress:
-			currentAssociatedAccounts, err = parseAssociatedTokenIx(ix, walletAddress, tx.Signature())
+			err = parseAssociatedTokenIxAssociatedAccounts(associatedAccounts, ix, walletAddress)
 		}
 
 		if err != nil {
-			return nil, err
-		}
-		if currentAssociatedAccounts != nil {
-			maps.Insert(associatedAccounts, maps.All(currentAssociatedAccounts))
+			return err
 		}
 	}
 
-	return associatedAccounts, nil
+	return nil
+}
+
+type EventsParser struct {
+	WalletAddress string
+}
+
+func (parser *EventsParser) isRelated(accounts ...string) bool {
+	return slices.Contains(accounts, parser.WalletAddress)
+}
+
+func (parser *EventsParser) ParseTx(tx ParsableTx) error {
+	for _, ix := range tx.Instructions() {
+		var err error
+
+		switch ix.ProgramAddress() {
+		case computeBudgetProgramAddress:
+			//
+		case systemProgramAddress:
+			err = parser.parseSystemIxEvents(ix)
+		case tokenProgramAddress:
+			err = parser.parseTokenIxEvents(ix)
+		case associatedTokenProgramAddress:
+			err = parser.parseAssociatedTokenIxEvents(ix, tx.Signature())
+		case jupiterV6ProgramAddress:
+			err = parser.parseJupV6Ix(ix, tx.Signature())
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

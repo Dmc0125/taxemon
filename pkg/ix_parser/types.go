@@ -63,3 +63,20 @@ type EventCloseAccount struct {
 func (e *EventCloseAccount) Type() uint8 {
 	return 3
 }
+
+type SwapToken struct {
+	Amount  uint64 `json:"amount"`
+	Account string `json:"account"`
+}
+
+type EventSwap struct {
+	ProgramAddress string `json:"program_address"`
+	// tokens sent away
+	From []*SwapToken `json:"from"`
+	// tokens received
+	To []*SwapToken `json:"to"`
+}
+
+func (e *EventSwap) Type() uint8 {
+	return 4
+}

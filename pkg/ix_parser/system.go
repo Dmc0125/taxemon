@@ -5,7 +5,7 @@ import (
 )
 
 const (
-	systomProgramAddress = "11111111111111111111111111111111"
+	systemProgramAddress = "11111111111111111111111111111111"
 
 	ixSystemCreateAccount        = 0
 	ixSystemTransfer             = 2
@@ -14,7 +14,7 @@ const (
 	ixSystemTransferWithSeed     = 11
 )
 
-func parseSystemIx(ix ParsableIx) error {
+func (_ *EventsParser) parseSystemIxEvents(ix ParsableIx) error {
 	dataWithDisc := ix.Data()
 	if len(dataWithDisc) < 1 {
 		return errDataTooSmall
@@ -111,7 +111,6 @@ func parseSystemIx(ix ParsableIx) error {
 		}
 	}
 
-	ix.SetKnown()
 	if ev != nil {
 		ix.AddEvent(ev)
 	}

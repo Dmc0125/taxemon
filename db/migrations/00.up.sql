@@ -49,7 +49,6 @@ CREATE TABLE instruction (
     transaction_id INTEGER NOT NULL,
     --
     idx INTEGER NOT NULL,
-    is_known BOOLEAN NOT NULL DEFAULT false,
     program_id_idx SMALLINT NOT NULL,
     accounts_idxs SMALLINT[] NOT NULL,
     data TEXT NOT NULL,
@@ -62,7 +61,7 @@ CREATE TABLE inner_instruction (
     transaction_id INTEGER NOT NULL,
     ix_idx INTEGER NOT NULL,
     --
-    idx SMALLINT NOT NULL,
+    idx INTEGER NOT NULL,
     program_id_idx SMALLINT NOT NULL,
     accounts_idxs SMALLINT[] NOT NULL,
     data TEXT NOT NULL,
@@ -73,6 +72,7 @@ CREATE TABLE inner_instruction (
 );
 
 CREATE TABLE event (
+    id SERIAL PRIMARY KEY,
     transaction_id INTEGER NOT NULL,
     ix_idx INTEGER NOT NULL,
     idx SMALLINT NOT NULL,
@@ -85,20 +85,22 @@ CREATE TABLE event (
     -- event data stored as json string bytes
     data JSONB NOT NULL,
     --
-    PRIMARY KEY (transaction_id, ix_idx),
+    UNIQUE (transaction_id, ix_idx),
     FOREIGN KEY (transaction_id) REFERENCES "transaction" (id),
     FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (transaction_id, idx) ON DELETE CASCADE
 );
 
 CREATE TABLE associated_account (
     address VARCHAR(255) NOT NULL,
+    wallet_id INTEGER NOT NULL,
     last_signature VARCHAR(255),
     --
     -- 0 -> token account
     type SMALLINT NOT NULL,
     data JSONB,
     --
-    PRIMARY KEY (address)
+    PRIMARY KEY (address),
+    FOREIGN KEY (wallet_id) REFERENCES wallet (id)
 );
 
 CREATE OR REPLACE FUNCTION get_inner_instructions(tx_id INTEGER, instruction_idx INTEGER)
@@ -109,7 +111,7 @@ RETURNS jsonb AS $$
                 'program_id_idx', iix.program_id_idx,
                 'accounts_idxs', to_jsonb(iix.accounts_idxs),
                 'data', iix.data
-            ) ORDER BY iix.idx
+            ) ORDER BY iix.idx ASC
         ),
         '[]'::jsonb
     )
@@ -123,24 +125,15 @@ RETURNS jsonb AS $$
     SELECT COALESCE(
         jsonb_agg(
             jsonb_build_object(
+                'idx', ix.idx,
                 'program_id_idx', ix.program_id_idx,
                 'accounts_idxs', to_jsonb(ix.accounts_idxs),
                 'data', ix.data,
                 'inner_ixs', get_inner_instructions(ix.transaction_id, ix.idx)
-            ) ORDER BY ix.idx
+            ) ORDER BY ix.idx ASC
         ),
         '[]'::jsonb
     )
     FROM instruction ix
     WHERE ix.transaction_id = tx_id;
 $$ LANGUAGE SQL STABLE;
-
-CREATE VIEW v_transaction AS
-SELECT
-    t.signature,
-    t.id,
-    t.accounts,
-    t.logs,
-    get_instructions(t.id) AS instructions
-FROM
-    "transaction" t;

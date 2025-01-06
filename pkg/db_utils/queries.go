@@ -3,6 +3,7 @@ package dbutils
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -18,6 +19,34 @@ type DBTX interface {
 	Get(dest interface{}, query string, args ...interface{}) error
 }
 
+type SelectTransactionsRow struct {
+	Id           int32
+	Signature    string
+	Accounts     pq.StringArray
+	Logs         pq.StringArray
+	Instructions json.RawMessage
+	Err          bool
+}
+
+func SelectTransactionsFromSignatures(db DBTX, signatures []string) ([]*SelectTransactionsRow, error) {
+	result := make([]*SelectTransactionsRow, 0)
+	q := `
+		select
+			t.id,
+			t.signature,
+			t.accounts,
+			t.logs,
+			t.err,
+			get_instructions(t.id) as instructions
+		from
+			"transaction" t
+		where
+			t.signature = any($1)
+	`
+	err := db.Select(&result, q, pq.StringArray(signatures))
+	return result, err
+}
+
 type SelectTransactionInstructionBase struct {
 	ProgramIdIdx int16   `json:"program_id_idx"`
 	AccountsIdxs []int16 `json:"accounts_idxs"`
@@ -26,28 +55,44 @@ type SelectTransactionInstructionBase struct {
 
 type SelectTransactionInstruction struct {
 	*SelectTransactionInstructionBase
+	Idx               int32
 	InnerInstructions []*SelectTransactionInstructionBase `json:"inner_ixs"`
 }
 
-type SelectTransactionsRow struct {
-	Id           int32
-	Signature    string
-	Accounts     pq.StringArray
-	Logs         pq.StringArray
-	Instructions json.RawMessage
+type SelectOrderedTransactionsRow struct {
+	*SelectTransactionsRow
+	Slot       int64
+	BlockIndex sql.NullInt32 `db:"block_index"`
 }
 
-func SelectTransactions(db DBTX, signatures []string) ([]*SelectTransactionsRow, error) {
-	result := make([]*SelectTransactionsRow, 0)
-	q := `
+func SelectOrderedTransactions(
+	db DBTX,
+	fromSlot int64,
+	fromBlockIndex int32,
+	limit int,
+) ([]*SelectOrderedTransactionsRow, error) {
+	result := make([]*SelectOrderedTransactionsRow, 0)
+	q := fmt.Sprintf(`
 		select
-			t.id, t.signature, t.accounts, t.logs, t.instructions
+			t.id,
+			t.slot,
+			t.block_index,
+			t.signature,
+			t.accounts,
+			t.logs,
+			get_instructions(t.id) as instructions
 		from
-			"v_transaction" t
+			"transaction" t
 		where
-			t.signature = any($1)
-	`
-	err := db.Select(&result, q, pq.StringArray(signatures))
+			((t.block_index is not null and t.block_index > $2 and t.slot >= $1)
+			or t.slot > $1)
+			and t.err = false
+		order by
+			t.timestamp asc, t.slot asc, t.block_index asc
+		limit
+			%d
+	`, limit)
+	err := db.Select(&result, q, fromSlot, fromBlockIndex)
 	return result, err
 }
 
@@ -72,7 +117,12 @@ func InsertTransactions(db DBTX, params []*InsertTransactionParams) ([]*InsertTr
 			"transaction" (signature, timestamp, slot, err, err_msg, accounts, logs)
 		values
 			(:signature, :timestamp, :slot, :err, :err_msg, :accounts, :logs)
-		returning id, signature
+		on conflict (
+			signature
+		) do nothing
+		returning
+			id, signature
+
 	`
 	rows, err := db.NamedQuery(q, params)
 	if err != nil {
@@ -92,7 +142,6 @@ func InsertTransactions(db DBTX, params []*InsertTransactionParams) ([]*InsertTr
 type InsertInstructionParams struct {
 	TransactionId int32 `db:"transaction_id"`
 	Idx           int32
-	IsKnown       bool            `db:"is_known"`
 	ProgramIdIdx  int16           `db:"program_id_idx"`
 	AccountsIdxs  pq.GenericArray `db:"accounts_idxs"`
 	Data          string
@@ -101,9 +150,9 @@ type InsertInstructionParams struct {
 func InsertInstructions(db DBTX, params []*InsertInstructionParams) error {
 	q := `
 		insert into
-			instruction (transaction_id, idx, is_known, program_id_idx, accounts_idxs, data)
+			instruction (transaction_id, idx, program_id_idx, accounts_idxs, data)
 		values
-			(:transaction_id, :idx, :is_known, :program_id_idx, :accounts_idxs, :data)
+			(:transaction_id, :idx, :program_id_idx, :accounts_idxs, :data)
 	`
 	_, err := db.NamedExec(q, params)
 	return err
@@ -112,7 +161,7 @@ func InsertInstructions(db DBTX, params []*InsertInstructionParams) error {
 type InsertInnerInstructionParams struct {
 	TransactionId int32 `db:"transaction_id"`
 	IxIdx         int32 `db:"ix_idx"`
-	Idx           int16
+	Idx           int32
 	ProgramIdIdx  int16           `db:"program_id_idx"`
 	AccountsIdxs  pq.GenericArray `db:"accounts_idxs"`
 	Data          string
@@ -161,23 +210,25 @@ func InsertTransactionsToWallet(db DBTX, walletId int32, transactionsIds []int32
 			transaction_to_wallet (wallet_id, transaction_id)
 		values
 			(:wallet_id, :transaction_id)
+		on conflict (wallet_id, transaction_id) do nothing
 	`
 	_, err := db.NamedExec(q, params)
 	return err
 }
 
 type InsertAssociatedAccountParams struct {
-	Address string
-	Type    int16
-	Data    string
+	WalletId int32 `db:"wallet_id"`
+	Address  string
+	Type     int16
+	Data     string
 }
 
 func InsertAssociatedAccounts(db DBTX, params []*InsertAssociatedAccountParams) error {
 	q := `
 		insert into
-			associated_account (address, type, data)
+			associated_account (wallet_id, address, type, data)
 		values
-			(:address, :type, :data)
+			(:wallet_id, :address, :type, :data)
 	`
 	_, err := db.NamedExec(q, params)
 	return err
@@ -224,7 +275,6 @@ func SelectDuplicateTimestampsTransactions(db DBTX) ([]*SelectDuplicateTimestamp
 		FROM
 		    "transaction" t1
 		    LEFT JOIN "transaction" t2 ON t2.slot = t1.slot
-		    AND t2.timestamp = t1.timestamp
 		    AND t2.signature != t1.signature
 		WHERE
 		    t1.block_index IS NULL
@@ -260,7 +310,7 @@ type SelectAssociatedAccountsRow struct {
 	LastSignature sql.NullString `db:"last_signature"`
 }
 
-func SelectAssociatedAccounts(db DBTX) ([]*SelectAssociatedAccountsRow, error) {
+func SelectAssociatedAccounts(db DBTX, walletId int32) ([]*SelectAssociatedAccountsRow, error) {
 	result := make([]*SelectAssociatedAccountsRow, 0)
 	q := `
 		SELECT
@@ -268,8 +318,10 @@ func SelectAssociatedAccounts(db DBTX) ([]*SelectAssociatedAccountsRow, error) {
 		    last_signature
 		FROM
 		    associated_account
+		WHERE
+			wallet_id = $1
 	`
-	err := db.Select(&result, q)
+	err := db.Select(&result, q, walletId)
 	return result, err
 }
 

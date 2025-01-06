@@ -8,15 +8,14 @@ import (
 	"runtime"
 	walletshandler "taxemon/handlers/wallets_handler"
 	"taxemon/pkg/assert"
-	"taxemon/pkg/fetcher"
 	"taxemon/pkg/logger"
 	"taxemon/pkg/rpc"
+	walletsync "taxemon/pkg/wallet_sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v4"
-	_ "modernc.org/sqlite"
 )
 
 func getProjectDir() string {
@@ -54,6 +53,6 @@ func main() {
 
 	walletshandler.Register(e, db, t)
 
-	go fetcher.Start(rpcClient, db)
+	go walletsync.Start(rpcClient, db)
 	e.Logger.Fatal(e.Start(":42069"))
 }

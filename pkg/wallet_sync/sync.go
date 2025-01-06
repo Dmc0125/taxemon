@@ -1,4 +1,4 @@
-package fetcher
+package walletsync
 
 import (
 	"database/sql"
@@ -21,7 +21,6 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/mr-tron/base58"
-	"golang.org/x/sync/errgroup"
 )
 
 func forceRpcRequest[T any](f func() (T, error), limit uint8) (T, error) {
@@ -97,9 +96,9 @@ func newInsertableInstructionBase(
 type insertableInstruction struct {
 	*insertableInstructionBase
 	innerInstructions []*insertableInstructionBase
-	events            []ixparser.Event
-	isKnown           bool
 }
+
+func (ix *insertableInstruction) AddEvent(_ ixparser.Event) {}
 
 func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
 	iixs := make([]ixparser.ParsableIxBase, len(ix.innerInstructions))
@@ -107,14 +106,6 @@ func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
 		iixs[i] = iix
 	}
 	return iixs
-}
-
-func (ix *insertableInstruction) AddEvent(event ixparser.Event) {
-	ix.events = append(ix.events, event)
-}
-
-func (ix *insertableInstruction) SetKnown() {
-	ix.isKnown = true
 }
 
 type insertableTransaction struct {
@@ -167,9 +158,9 @@ func newInsertableTransaction(tx *rpc.ParsedTransactionResult) (*insertableTrans
 	itx.addresses = slices.AppendSeq(
 		slices.AppendSeq(
 			slices.Clone(tx.Transaction.Message.AccountKeys),
-			slices.Values(tx.Meta.LoadedAddresses.Readonly),
+			slices.Values(tx.Meta.LoadedAddresses.Writable),
 		),
-		slices.Values(tx.Meta.LoadedAddresses.Writable),
+		slices.Values(tx.Meta.LoadedAddresses.Readonly),
 	)
 
 	for _, msg := range tx.Meta.LogMessages {
@@ -245,7 +236,6 @@ func insertTransactions(db *sqlx.DB, txs []*insertableTransaction) []*dbutils.In
 
 	insertInstructionsParams := make([]*dbutils.InsertInstructionParams, 0)
 	insertInnerInstructionsParams := make([]*dbutils.InsertInnerInstructionParams, 0)
-	insertEventsParams := make([]*dbutils.InsertEventParams, 0)
 
 	for _, tx := range txs {
 		txIdIdx := slices.IndexFunc(insertedTxs, func(itx *dbutils.InsertTransactionsRow) bool {
@@ -258,7 +248,6 @@ func insertTransactions(db *sqlx.DB, txs []*insertableTransaction) []*dbutils.In
 			insertInstructionsParams = append(insertInstructionsParams, &dbutils.InsertInstructionParams{
 				TransactionId: txId,
 				Idx:           int32(i),
-				IsKnown:       ix.isKnown,
 				ProgramIdIdx:  ix.programIdIdx,
 				AccountsIdxs:  pq.GenericArray{A: ix.accountsIndexes},
 				Data:          hex.EncodeToString(ix.data),
@@ -268,22 +257,10 @@ func insertTransactions(db *sqlx.DB, txs []*insertableTransaction) []*dbutils.In
 				insertInnerInstructionsParams = append(insertInnerInstructionsParams, &dbutils.InsertInnerInstructionParams{
 					TransactionId: txId,
 					IxIdx:         int32(i),
-					Idx:           int16(j),
+					Idx:           int32(j),
 					ProgramIdIdx:  innerIx.programIdIdx,
 					AccountsIdxs:  pq.GenericArray{A: innerIx.accountsIndexes},
 					Data:          hex.EncodeToString(innerIx.data),
-				})
-			}
-
-			for j, event := range ix.events {
-				eventSerialized, err := json.Marshal(event)
-				assert.NoErr(err, "unable to marshal event data", "event data", event)
-				insertEventsParams = append(insertEventsParams, &dbutils.InsertEventParams{
-					TransactionId: txId,
-					IxIdx:         int32(i),
-					Idx:           int16(j),
-					Type:          int16(event.Type()),
-					Data:          string(eventSerialized),
 				})
 			}
 		}
@@ -293,25 +270,10 @@ func insertTransactions(db *sqlx.DB, txs []*insertableTransaction) []*dbutils.In
 		err = dbutils.InsertInstructions(tx, insertInstructionsParams)
 		assert.NoErr(err, "unable to insert instructions")
 
-		var eg errgroup.Group
 		if len(insertInnerInstructionsParams) > 0 {
-			eg.TryGo(func() error {
-				if err := dbutils.InsertInnerInstructions(tx, insertInnerInstructionsParams); err != nil {
-					return fmt.Errorf("unable to insert inner instructions: %w", err)
-				}
-				return nil
-			})
+			err = dbutils.InsertInnerInstructions(tx, insertInnerInstructionsParams)
+			assert.NoErr(err, "unable to insert inner instructions")
 		}
-		if len(insertEventsParams) > 0 {
-			eg.TryGo(func() error {
-				if err := dbutils.InsertEvents(tx, insertEventsParams); err != nil {
-					return fmt.Errorf("unable to insert events: %w", err)
-				}
-				return nil
-			})
-		}
-		err = eg.Wait()
-		assert.NoErr(err, "")
 	}
 
 	err = tx.Commit()
@@ -319,30 +281,33 @@ func insertTransactions(db *sqlx.DB, txs []*insertableTransaction) []*dbutils.In
 	return insertedTxs
 }
 
-type savedInstructionBase struct {
+type SavedInstructionBase struct {
 	programAddress string
 	accounts       []string
 	data           []byte
 }
 
-func (ix *savedInstructionBase) ProgramAddress() string {
+func (ix *SavedInstructionBase) ProgramAddress() string {
 	return ix.programAddress
 }
 
-func (ix *savedInstructionBase) AccountsAddresses() []string {
+func (ix *SavedInstructionBase) AccountsAddresses() []string {
 	return ix.accounts
 }
 
-func (ix *savedInstructionBase) Data() []byte {
+func (ix *SavedInstructionBase) Data() []byte {
 	return ix.data
 }
 
-type savedInstruction struct {
-	*savedInstructionBase
-	innerInstructions []*savedInstructionBase
+type SavedInstruction struct {
+	*SavedInstructionBase
+	Idx               int32
+	IsKnown           bool
+	innerInstructions []*SavedInstructionBase
+	Events            []ixparser.Event
 }
 
-func (ix *savedInstruction) InnerIxs() []ixparser.ParsableIxBase {
+func (ix *SavedInstruction) InnerIxs() []ixparser.ParsableIxBase {
 	iixs := make([]ixparser.ParsableIxBase, len(ix.innerInstructions))
 	for i, iix := range ix.innerInstructions {
 		iixs[i] = iix
@@ -350,22 +315,26 @@ func (ix *savedInstruction) InnerIxs() []ixparser.ParsableIxBase {
 	return iixs
 }
 
-func (ix *savedInstruction) AddEvent(_ ixparser.Event) {}
+func (ix *SavedInstruction) AddEvent(event ixparser.Event) {
+	ix.Events = append(ix.Events, event)
+}
 
-func (ix *savedInstruction) SetKnown() {}
+func (ix *SavedInstruction) SetKnown() {
+	ix.IsKnown = true
+}
 
-type savedTransaction struct {
+type SavedTransaction struct {
 	signature    string
 	id           int32
 	logs         []string
-	instructions []*savedInstruction
+	instructions []*SavedInstruction
 }
 
-func (tx *savedTransaction) Signature() string {
+func (tx *SavedTransaction) Signature() string {
 	return tx.signature
 }
 
-func (tx *savedTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
+func (tx *SavedTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
 	ixs := make([]ixparser.ParsableIx, len(tx.instructions))
 	for i, ix := range tx.instructions {
 		ixs[i] = ix
@@ -373,17 +342,11 @@ func (tx *savedTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
 	return slices.All(ixs)
 }
 
-func (tx *savedTransaction) Logs() iter.Seq2[int, string] {
+func (tx *SavedTransaction) Logs() iter.Seq2[int, string] {
 	return slices.All(tx.logs)
 }
 
-type savedInstructionBaseSerialized struct {
-	ProgramAddress string `json:"program_address"`
-	AccountsIdxs   string `json:"accounts_idxs"`
-	Data           string
-}
-
-func newSavedInstructionBase(ix *dbutils.SelectTransactionInstructionBase, tx *dbutils.SelectTransactionsRow) *savedInstructionBase {
+func newSavedInstructionBase(ix *dbutils.SelectTransactionInstructionBase, tx *dbutils.SelectTransactionsRow) *SavedInstructionBase {
 	assert.True(int(ix.ProgramIdIdx) < len(tx.Accounts), "program id idx overflow", tx.Accounts, ix.ProgramIdIdx)
 	accounts := make([]string, len(ix.AccountsIdxs))
 	for i, aIdx := range ix.AccountsIdxs {
@@ -392,7 +355,7 @@ func newSavedInstructionBase(ix *dbutils.SelectTransactionInstructionBase, tx *d
 	}
 	data, err := hex.DecodeString(ix.Data)
 	assert.NoErr(err, "invalid data", "data", ix.Data)
-	savedIxBase := &savedInstructionBase{
+	savedIxBase := &SavedInstructionBase{
 		programAddress: tx.Accounts[ix.ProgramIdIdx],
 		accounts:       accounts,
 		data:           data,
@@ -400,20 +363,21 @@ func newSavedInstructionBase(ix *dbutils.SelectTransactionInstructionBase, tx *d
 	return savedIxBase
 }
 
-func DeserializeSavedTransaction(tx *dbutils.SelectTransactionsRow) *savedTransaction {
+func DeserializeSavedTransaction(tx *dbutils.SelectTransactionsRow) *SavedTransaction {
 	var instructions []*dbutils.SelectTransactionInstruction
 	err := json.Unmarshal(tx.Instructions, &instructions)
 	assert.NoErr(err, "unable to unmarshal tx row instructions", "instructions", tx.Instructions)
 
-	savedIxs := make([]*savedInstruction, len(instructions))
+	savedIxs := make([]*SavedInstruction, len(instructions))
 	for i, ix := range instructions {
-		savedIx := savedInstruction{
-			savedInstructionBase: newSavedInstructionBase(&dbutils.SelectTransactionInstructionBase{
+		savedIx := SavedInstruction{
+			SavedInstructionBase: newSavedInstructionBase(&dbutils.SelectTransactionInstructionBase{
 				ProgramIdIdx: ix.ProgramIdIdx,
 				AccountsIdxs: ix.AccountsIdxs,
 				Data:         ix.Data,
 			}, tx),
-			innerInstructions: make([]*savedInstructionBase, len(ix.InnerInstructions)),
+			Idx:               ix.Idx,
+			innerInstructions: make([]*SavedInstructionBase, len(ix.InnerInstructions)),
 		}
 		for j, iix := range ix.InnerInstructions {
 			savedIx.innerInstructions[j] = newSavedInstructionBase(iix, tx)
@@ -421,7 +385,7 @@ func DeserializeSavedTransaction(tx *dbutils.SelectTransactionsRow) *savedTransa
 		savedIxs[i] = &savedIx
 	}
 
-	deserializedTx := savedTransaction{
+	deserializedTx := SavedTransaction{
 		signature:    tx.Signature,
 		id:           tx.Id,
 		logs:         tx.Logs,
@@ -473,42 +437,55 @@ func fixTimestampDuplicates(rpcClient *rpc.Client, db *sqlx.DB) error {
 }
 
 type AssociatedAccounts struct {
-	currentIter map[string]ixparser.AssociatedAccount
+	CurrentIter map[string]ixparser.AssociatedAccount
 	all         map[string]string
 }
 
-func newAssociatedAccounts() *AssociatedAccounts {
+func NewAssociatedAccounts() *AssociatedAccounts {
 	return &AssociatedAccounts{
-		currentIter: make(map[string]ixparser.AssociatedAccount),
+		CurrentIter: make(map[string]ixparser.AssociatedAccount),
 		all:         make(map[string]string),
 	}
 }
 
-func (a *AssociatedAccounts) init(db *sqlx.DB) error {
-	associatedAccounts, err := dbutils.SelectAssociatedAccounts(db)
-	if err != nil {
-		return err
+func (a *AssociatedAccounts) Append(account ixparser.AssociatedAccount) {
+	a.CurrentIter[account.Address()] = account
+}
+
+func (a *AssociatedAccounts) Contains(address string) bool {
+	_, ok := a.CurrentIter[address]
+	if !ok {
+		_, ok = a.all[address]
 	}
+	return ok
+}
+
+func (a *AssociatedAccounts) AppendCurrent(current map[string]ixparser.AssociatedAccount) {
+	maps.Insert(a.CurrentIter, maps.All(current))
+}
+
+func (a *AssociatedAccounts) FetchExisting(db *sqlx.DB, walletId int32) {
+	associatedAccounts, err := dbutils.SelectAssociatedAccounts(db, walletId)
+	assert.NoErr(err, "unable to select associated accounts")
 	for _, aa := range associatedAccounts {
 		a.all[aa.Address] = aa.LastSignature.String
 	}
-	return nil
 }
 
-func (a *AssociatedAccounts) flush() []ixparser.AssociatedAccount {
-	if len(a.currentIter) == 0 {
+func (a *AssociatedAccounts) Flush() []ixparser.AssociatedAccount {
+	if len(a.CurrentIter) == 0 {
 		return nil
 	}
 
 	new := make([]ixparser.AssociatedAccount, 0)
-	for address, account := range a.currentIter {
+	for address, account := range a.CurrentIter {
 		_, ok := a.all[address]
 		if !ok {
 			new = append(new, account)
 			a.all[address] = ""
 		}
 	}
-	a.currentIter = make(map[string]ixparser.AssociatedAccount)
+	a.CurrentIter = make(map[string]ixparser.AssociatedAccount)
 	return new
 }
 
@@ -545,7 +522,7 @@ func newFetcher(
 	}
 }
 
-func (f *Fetcher) fetchNext() (bool, []*insertableTransaction) {
+func (f *Fetcher) fetchNext() (bool, []*insertableTransaction, []*dbutils.SelectTransactionsRow) {
 	signaturesResults, err := forceRpcRequest(func() ([]*rpc.SignatureResult, error) {
 		return f.rpcClient.GetSignaturesForAddress(f.address, f.config)
 	}, 5)
@@ -553,7 +530,7 @@ func (f *Fetcher) fetchNext() (bool, []*insertableTransaction) {
 	slog.Info("fetched signatures for address", "signatures", len(signaturesResults))
 
 	if len(signaturesResults) == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	if f.latestSignature == "" {
 		f.latestSignature = signaturesResults[0].Signature
@@ -563,24 +540,23 @@ func (f *Fetcher) fetchNext() (bool, []*insertableTransaction) {
 	for i, sr := range signaturesResults {
 		signatures[i] = sr.Signature
 	}
-	savedTransactions, err := dbutils.SelectTransactions(f.db, signatures)
+	savedTransactions, err := dbutils.SelectTransactionsFromSignatures(f.db, signatures)
 	assert.NoErr(err, "unable to fetch saved transactions")
 
 	if f.associatedAccounts != nil {
 		for _, tx := range savedTransactions {
-			deserializedSavedTx := DeserializeSavedTransaction(tx)
-			assert.NoErr(err, "unable to deserialize saved tx", "tx", tx)
-
-			currentAssociatedAccounts, err := ixparser.ParseTx(deserializedSavedTx, f.address)
-			assert.NoErr(err, "unable to parse tx")
-			maps.Insert(f.associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
+			if !tx.Err {
+				dtx := DeserializeSavedTransaction(tx)
+				err = ixparser.ParseAssociatedAccounts(f.associatedAccounts, dtx, f.address)
+				assert.NoErr(err, "unable to parse associated accounts")
+			}
 		}
 	}
 
 	insertableTransactions := make([]*insertableTransaction, 0)
 	for _, sr := range signaturesResults {
-		if txIdx := slices.IndexFunc(savedTransactions, func(tx *dbutils.SelectTransactionsRow) bool {
-			return tx.Signature == sr.Signature
+		if txIdx := slices.IndexFunc(savedTransactions, func(s *dbutils.SelectTransactionsRow) bool {
+			return s.Signature == sr.Signature
 		}); txIdx > -1 {
 			continue
 		}
@@ -594,11 +570,9 @@ func (f *Fetcher) fetchNext() (bool, []*insertableTransaction) {
 		insertableTx, err := newInsertableTransaction(tx)
 		assert.NoErr(err, "unable to create insertable tx")
 
-		currentAssociatedAccounts, err := ixparser.ParseTx(insertableTx, f.address)
-		assert.NoErr(err, "unable to parse tx")
-
-		if f.associatedAccounts != nil {
-			maps.Insert(f.associatedAccounts.currentIter, maps.All(currentAssociatedAccounts))
+		if !insertableTx.err {
+			err = ixparser.ParseAssociatedAccounts(f.associatedAccounts, insertableTx, f.address)
+			assert.NoErr(err, "unable to parse associated accounts")
 		}
 
 		insertableTransactions = append(insertableTransactions, insertableTx)
@@ -607,10 +581,10 @@ func (f *Fetcher) fetchNext() (bool, []*insertableTransaction) {
 	f.config.Before = signatures[len(signatures)-1]
 	hasNext := len(signaturesResults) == int(*f.config.Limit)
 
-	return hasNext, insertableTransactions
+	return hasNext, insertableTransactions, savedTransactions
 }
 
-func syncAddress(
+func fetchTransactionsForAddress(
 	rpcClient *rpc.Client,
 	db *sqlx.DB,
 	associatedAccounts *AssociatedAccounts,
@@ -618,91 +592,159 @@ func syncAddress(
 	address string,
 	lastSignature string,
 ) {
-	slog.Info("running address sync", "address", address)
 	fetcher := newFetcher(rpcClient, db, associatedAccounts, address, lastSignature)
+	isAssociatedAccount := associatedAccounts == nil
 
 	for {
-		hasNext, insertableTransactions := fetcher.fetchNext()
+		hasNext, insertableTransactions, savedTransactions := fetcher.fetchNext()
 		if insertableTransactions == nil {
 			break
 		}
 
+		var insertedTxs []*dbutils.InsertTransactionsRow
 		if len(insertableTransactions) > 0 {
 			slog.Info("inserting transactions")
-			insertedTxs := insertTransactions(db, insertableTransactions)
+			insertedTxs = insertTransactions(db, insertableTransactions)
+		}
 
-			var dbtx dbutils.DBTX = db
-			if associatedAccounts != nil {
-				insertableAccounts := associatedAccounts.flush()
-				if insertableAccounts != nil {
-					var err error
-					dbtx, err = db.Beginx()
-					assert.NoErr(err, "unable to begin tx")
+		tx, err := db.Beginx()
+		assert.NoErr(err, "unable to begin tx")
 
-					slog.Info("inserting associated accounts")
-					params := make([]*dbutils.InsertAssociatedAccountParams, len(insertableAccounts))
-					for i, aa := range insertableAccounts {
-						data, err := aa.Data()
-						assert.NoErr(err, "unable to serialize associated account data")
-
-						params[i] = &dbutils.InsertAssociatedAccountParams{
-							Address: aa.Address(),
-							Type:    int16(aa.Type()),
-							Data:    string(data),
-						}
-					}
-					err = dbutils.InsertAssociatedAccounts(dbtx, params)
-					assert.NoErr(err, "unable to insert associated accounts")
-				}
-			}
-
+		if len(insertableTransactions) > 0 || len(savedTransactions) > 0 {
 			slog.Info("inserting transactions to wallet")
 			transactionsIds := make([]int32, len(insertedTxs))
 			for i, tx := range insertedTxs {
 				transactionsIds[i] = tx.Id
 			}
-			err := dbutils.InsertTransactionsToWallet(dbtx, walletId, transactionsIds)
+			for _, tx := range savedTransactions {
+				transactionsIds = append(transactionsIds, tx.Id)
+			}
+			err = dbutils.InsertTransactionsToWallet(tx, walletId, transactionsIds)
 			assert.NoErr(err, "unable to insert transactions_to_wallet")
+		}
 
-			switch tx := dbtx.(type) {
-			case *sqlx.Tx:
-				err = tx.Commit()
-				assert.NoErr(err, "unable to commit")
+		if fetcher.latestSignature != "" {
+			slog.Info("update last signature", "address", address, "ls", fetcher.latestSignature)
+			err = dbutils.UpdateLastSignature(tx, isAssociatedAccount, address, fetcher.latestSignature)
+			assert.NoErr(err, "unable to update last signature")
+		}
+
+		if !isAssociatedAccount {
+			if flushed := associatedAccounts.Flush(); len(flushed) > 0 {
+				insertableAssociatedAccounts := make([]*dbutils.InsertAssociatedAccountParams, len(flushed))
+				for i, account := range flushed {
+					data, err := account.Data()
+					assert.NoErr(err, "unable to serialize associated account")
+					insertableAssociatedAccounts[i] = &dbutils.InsertAssociatedAccountParams{
+						WalletId: walletId,
+						Address:  account.Address(),
+						Type:     int16(account.Type()),
+						Data:     string(data),
+					}
+				}
+				slog.Info("inserting associated accounts")
+				err = dbutils.InsertAssociatedAccounts(tx, insertableAssociatedAccounts)
+				assert.NoErr(err, "unable to insert associated accounts")
 			}
 		}
+
+		err = tx.Commit()
+		assert.NoErr(err, "unable to commit")
 
 		if !hasNext {
 			break
 		}
 	}
-
-	if fetcher.latestSignature == "" {
-		return
-	}
-
-	err := dbutils.UpdateLastSignature(db, associatedAccounts == nil, address, fetcher.latestSignature)
-	assert.NoErr(err, "unable to update wallet or associated account")
 }
 
-func SyncWallet(
+func syncWallet(
 	rpcClient *rpc.Client,
 	db *sqlx.DB,
 	walletId int32,
 	walletAddress string,
-	lastSigature string,
-) error {
-	associatedAccounts := newAssociatedAccounts()
-	associatedAccounts.init(db)
+	lastSignature string,
+) {
+	associatedAccounts := NewAssociatedAccounts()
+	associatedAccounts.FetchExisting(db, walletId)
 
-	slog.Info("syncing wallet", "walletAddress", walletAddress)
-	syncAddress(rpcClient, db, associatedAccounts, walletId, walletAddress, lastSigature)
+	slog.Info("fetching transactions for main wallet", "address", walletAddress)
+	fetchTransactionsForAddress(rpcClient, db, associatedAccounts, walletId, walletAddress, lastSignature)
 
 	for address, lastSignature := range associatedAccounts.all {
-		slog.Info("syncing associated account", "address", address)
-		syncAddress(rpcClient, db, nil, walletId, address, lastSignature)
+		slog.Info("fetching transactions for associated account", "address", address)
+		fetchTransactionsForAddress(rpcClient, db, nil, walletId, address, lastSignature)
 	}
 
-	return fixTimestampDuplicates(rpcClient, db)
+	slog.Info("fixing timestamps duplicates")
+	err := fixTimestampDuplicates(rpcClient, db)
+	assert.NoErr(err, "unable to fix timestamps duplicates")
+
+	err = dbutils.UpdateSyncRequestStatus(db, walletId, dbutils.SyncRequestStatusParsing)
+	assert.NoErr(err, "unable to update sync request status")
+
+	fromSlot := int64(0)
+	fromBlockIndex := int32(-1)
+	insertableEvents := make([]*dbutils.InsertEventParams, 0)
+	parser := ixparser.EventsParser{
+		WalletAddress: walletAddress,
+	}
+
+	for {
+		slog.Info(
+			"parsing instructions into events",
+			"fromSlot",
+			fromSlot,
+			"fromBlockIndex",
+			fromBlockIndex,
+		)
+		transactions, err := dbutils.SelectOrderedTransactions(db, fromSlot, fromBlockIndex, 1000)
+		assert.NoErr(err, "unable to select ordered transactions")
+
+		if len(transactions) == 0 {
+			break
+		}
+
+		for _, tx := range transactions {
+			dtx := DeserializeSavedTransaction(tx.SelectTransactionsRow)
+
+			err := parser.ParseTx(dtx)
+			assert.NoErr(err, "unable to parse tx")
+
+			for _, ix := range dtx.instructions {
+				for i, event := range ix.Events {
+					eventData, err := json.Marshal(event)
+					assert.NoErr(err, "unable to serialize event")
+
+					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
+						TransactionId: tx.Id,
+						IxIdx:         ix.Idx,
+						Idx:           int16(i),
+						Type:          int16(event.Type()),
+						Data:          string(eventData),
+					})
+				}
+			}
+		}
+
+		lastTx := transactions[len(transactions)-1]
+		if lastTx.Slot == fromSlot {
+			assert.True(
+				lastTx.BlockIndex.Valid,
+				"block index should be valid",
+				"txid", lastTx.Id, "blockIndex", lastTx.BlockIndex,
+			)
+			fromBlockIndex = lastTx.BlockIndex.Int32
+		} else {
+			fromBlockIndex = -1
+		}
+		fromSlot = lastTx.Slot
+	}
+
+	if len(insertableEvents) > 0 {
+		slog.Info("inserting events")
+		err = dbutils.InsertEvents(db, insertableEvents)
+		assert.NoErr(err, "unable to insert events")
+	}
 }
 
 func Start(
@@ -721,18 +763,7 @@ outer:
 			}
 			assert.NoErr(err, "unable to get latest sync request")
 
-			err = SyncWallet(
-				rpcClient,
-				db,
-				syncRequest.WalletId,
-				syncRequest.Address,
-				syncRequest.LastSignature.String,
-			)
-			assert.NoErr(err, "unable to sync wallet", "sync request", syncRequest)
-
-			err = dbutils.UpdateSyncRequestStatus(db, syncRequest.WalletId, dbutils.SyncRequestStatusParsing)
-			assert.NoErr(err, "unable to update sync request status")
-
+			syncWallet(rpcClient, db, syncRequest.WalletId, syncRequest.Address, syncRequest.LastSignature.String)
 			slog.Info("wallet syncing finished", "address", syncRequest.Address)
 		}
 	}

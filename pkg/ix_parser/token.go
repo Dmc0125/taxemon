@@ -20,34 +20,54 @@ const (
 	ixTokenInitAccount3 = 18
 )
 
-func getFromToAccounts(fromIdx, toIdx, l int, accounts []string) (string, string, error) {
-	if len(accounts) < l {
-		return "", "", errAccountsTooSmall
+func parseTokenIxAssociatedAccounts(associatedAccounts AssociatedAccounts, ix ParsableIx) error {
+	data := ix.Data()
+	if len(data) < 1 {
+		return errDataTooSmall
 	}
-	from := accounts[fromIdx]
-	to := accounts[toIdx]
-	return from, to, nil
+
+	switch data[0] {
+	case ixTokenInitAccount3:
+		fallthrough
+	case ixTokenInitAccount2:
+		fallthrough
+	case ixTokenInitAccount:
+		accounts := ix.AccountsAddresses()
+		if len(accounts) < 2 {
+			return errAccountsTooSmall
+		}
+		newAccount := accounts[0]
+		mint := accounts[1]
+		associatedAccounts.Append(&AssociatedAccountToken{address: newAccount, mint: mint})
+	}
+
+	return nil
 }
 
-func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
+func (parser *EventsParser) parseTokenIxEvents(ix ParsableIx) error {
 	dataWithDisc := ix.Data()
 	if len(dataWithDisc) < 1 {
-		return nil, errDataTooSmall
+		return errDataTooSmall
 	}
 	data := dataWithDisc[1:]
 
 	switch dataWithDisc[0] {
 	case ixTokenTransfer:
-		from, to, err := getFromToAccounts(0, 1, 2, ix.AccountsAddresses())
-		if err != nil {
-			return nil, err
+		accounts := ix.AccountsAddresses()
+		if len(accounts) < 2 {
+			return errAccountsTooSmall
+		}
+		from := accounts[0]
+		to := accounts[1]
+
+		if !parser.isRelated(from, to) {
+			return nil
 		}
 		if len(data) < 8 {
-			return nil, errDataTooSmall
+			return errDataTooSmall
 		}
 
 		amount := binary.LittleEndian.Uint64(data)
-		ix.SetKnown()
 		ix.AddEvent(&EventTransfer{
 			ProgramAddress: tokenProgramAddress,
 			IsRent:         false,
@@ -56,15 +76,20 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 			Amount:         amount,
 		})
 	case ixTokenTransferChecked:
-		from, to, err := getFromToAccounts(0, 2, 3, ix.AccountsAddresses())
-		if err != nil {
-			return nil, err
+		accounts := ix.AccountsAddresses()
+		if len(accounts) < 3 {
+			return errAccountsTooSmall
+		}
+		from := accounts[0]
+		to := accounts[2]
+
+		if !parser.isRelated(from, to) {
+			return nil
 		}
 		if len(data) < 8 {
-			return nil, errDataTooSmall
+			return errDataTooSmall
 		}
 		amount := binary.LittleEndian.Uint64(data)
-		ix.SetKnown()
 		ix.AddEvent(&EventTransfer{
 			ProgramAddress: tokenProgramAddress,
 			IsRent:         false,
@@ -77,16 +102,19 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 	case ixTokenMintTo:
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 2 {
-			return nil, errAccountsTooSmall
+			return errAccountsTooSmall
+		}
+		to := accounts[1]
+		if !parser.isRelated(to) {
+			return nil
 		}
 		if len(data) < 8 {
-			return nil, errDataTooSmall
+			return errDataTooSmall
 		}
 		amount := binary.LittleEndian.Uint64(data)
-		ix.SetKnown()
 		ix.AddEvent(&EventMint{
 			ProgramAddress: tokenProgramAddress,
-			To:             accounts[1],
+			To:             to,
 			Amount:         amount,
 		})
 	case ixTokenBurnChecked:
@@ -94,45 +122,39 @@ func parseTokenIx(ix ParsableIx) (map[string]AssociatedAccount, error) {
 	case ixTokenBurn:
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 1 {
-			return nil, errAccountsTooSmall
+			return errAccountsTooSmall
+		}
+		from := accounts[0]
+		if !parser.isRelated(from) {
+			return nil
 		}
 		if len(data) < 8 {
-			return nil, errDataTooSmall
+			return errDataTooSmall
 		}
 		amount := binary.LittleEndian.Uint64(data)
-		ix.SetKnown()
 		ix.AddEvent(&EventBurn{
 			ProgramAddress: tokenProgramAddress,
-			From:           accounts[0],
+			From:           from,
 			Amount:         amount,
 		})
 	case ixTokenCloseAccount:
-		from, to, err := getFromToAccounts(0, 1, 2, ix.AccountsAddresses())
-		if err != nil {
-			return nil, err
+		accounts := ix.AccountsAddresses()
+		if len(accounts) < 2 {
+			return errAccountsTooSmall
 		}
-		ix.SetKnown()
+		from := accounts[0]
+		to := accounts[1]
+
+		if !parser.isRelated(from, to) {
+			return nil
+		}
+
 		ix.AddEvent(&EventCloseAccount{
 			ProgramAddress: tokenProgramAddress,
 			From:           from,
 			To:             to,
 		})
-	case ixTokenInitAccount3:
-		fallthrough
-	case ixTokenInitAccount2:
-		fallthrough
-	case ixTokenInitAccount:
-		accountAddress, mint, err := getFromToAccounts(0, 1, 2, ix.AccountsAddresses())
-		if err != nil {
-			return nil, err
-		}
-		accounts := make(map[string]AssociatedAccount)
-		accounts[accountAddress] = &AssociatedAccountToken{address: accountAddress, mint: mint}
-		ix.SetKnown()
-		return accounts, nil
-	default:
-		ix.SetKnown()
 	}
 
-	return nil, nil
+	return nil
 }

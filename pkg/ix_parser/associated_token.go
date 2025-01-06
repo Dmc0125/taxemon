@@ -7,7 +7,30 @@ import (
 
 const associatedTokenProgramAddress = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 
-func parseAssociatedTokenIx(ix ParsableIx, walletAddress, signature string) (map[string]AssociatedAccount, error) {
+func parseAssociatedTokenIxAssociatedAccounts(associatedAccounts AssociatedAccounts, ix ParsableIx, walletAddress string) error {
+	data := ix.Data()
+	isCreate := len(data) == 0 || data[0] == 0 || data[0] == 1
+
+	if isCreate {
+		accounts := ix.AccountsAddresses()
+		if len(accounts) < 4 {
+			return errAccountsTooSmall
+		}
+
+		owner := accounts[2]
+		if owner == walletAddress {
+			associatedAccounts.Append(&AssociatedAccountToken{
+				address: accounts[1],
+				mint:    accounts[3],
+			})
+			return nil
+		}
+	}
+
+	return nil
+}
+
+func (parser *EventsParser) parseAssociatedTokenIxEvents(ix ParsableIx, signature string) error {
 	data := ix.Data()
 	isCreate := len(data) == 0 || data[0] == 0 || data[0] == 1
 
@@ -17,18 +40,20 @@ func parseAssociatedTokenIx(ix ParsableIx, walletAddress, signature string) (map
 		innerIxsLen := len(innerIxs)
 
 		if innerIxsLen == 0 {
-			ix.SetKnown()
-			return nil, nil
+			return nil
 		}
 
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 3 {
-			return nil, errAccountsTooSmall
+			return errAccountsTooSmall
 		}
-		ix.SetKnown()
 
 		from := accounts[0]
 		to := accounts[1]
+
+		if !parser.isRelated(from) {
+			return nil
+		}
 
 		if innerIxsLen == 4 || innerIxsLen == 6 {
 			// create from zero lamports || create with lamports
@@ -45,20 +70,10 @@ func parseAssociatedTokenIx(ix ParsableIx, walletAddress, signature string) (map
 				IsRent:         true,
 			})
 		}
-
-		owner := accounts[2]
-		if owner == walletAddress {
-			associatedAccounts := make(map[string]AssociatedAccount, 0)
-			associatedAccounts[to] = &AssociatedAccountToken{
-				address: to,
-				mint:    accounts[2],
-			}
-			return associatedAccounts, nil
-		}
 	} else {
 		// RECOVER NESTED
 		slog.Error("unimplemented associated token instruction (recover nested)", "signature", signature)
 	}
 
-	return nil, nil
+	return nil
 }
