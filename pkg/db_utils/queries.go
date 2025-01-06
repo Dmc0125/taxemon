@@ -88,7 +88,7 @@ func SelectOrderedTransactions(
 			or t.slot > $1)
 			and t.err = false
 		order by
-			t.timestamp asc, t.slot asc, t.block_index asc
+			t.slot asc, t.block_index asc
 		limit
 			%d
 	`, limit)

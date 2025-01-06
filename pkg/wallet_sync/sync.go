@@ -125,7 +125,7 @@ func (tx *insertableTransaction) Signature() string {
 	return tx.signature
 }
 
-func (tx *insertableTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
+func (tx *insertableTransaction) GetInstructions() iter.Seq2[int, ixparser.ParsableIx] {
 	ixs := make([]ixparser.ParsableIx, len(tx.ixs))
 	for i, ix := range tx.ixs {
 		ixs[i] = ix
@@ -302,7 +302,6 @@ func (ix *SavedInstructionBase) Data() []byte {
 type SavedInstruction struct {
 	*SavedInstructionBase
 	Idx               int32
-	IsKnown           bool
 	innerInstructions []*SavedInstructionBase
 	Events            []ixparser.Event
 }
@@ -319,24 +318,20 @@ func (ix *SavedInstruction) AddEvent(event ixparser.Event) {
 	ix.Events = append(ix.Events, event)
 }
 
-func (ix *SavedInstruction) SetKnown() {
-	ix.IsKnown = true
-}
-
 type SavedTransaction struct {
 	signature    string
 	id           int32
 	logs         []string
-	instructions []*SavedInstruction
+	Instructions []*SavedInstruction
 }
 
 func (tx *SavedTransaction) Signature() string {
 	return tx.signature
 }
 
-func (tx *SavedTransaction) Instructions() iter.Seq2[int, ixparser.ParsableIx] {
-	ixs := make([]ixparser.ParsableIx, len(tx.instructions))
-	for i, ix := range tx.instructions {
+func (tx *SavedTransaction) GetInstructions() iter.Seq2[int, ixparser.ParsableIx] {
+	ixs := make([]ixparser.ParsableIx, len(tx.Instructions))
+	for i, ix := range tx.Instructions {
 		ixs[i] = ix
 	}
 	return slices.All(ixs)
@@ -389,7 +384,7 @@ func DeserializeSavedTransaction(tx *dbutils.SelectTransactionsRow) *SavedTransa
 		signature:    tx.Signature,
 		id:           tx.Id,
 		logs:         tx.Logs,
-		instructions: savedIxs,
+		Instructions: savedIxs,
 	}
 	return &deserializedTx
 }
@@ -685,9 +680,7 @@ func syncWallet(
 	fromSlot := int64(0)
 	fromBlockIndex := int32(-1)
 	insertableEvents := make([]*dbutils.InsertEventParams, 0)
-	parser := ixparser.EventsParser{
-		WalletAddress: walletAddress,
-	}
+	parser := ixparser.NewEventsParser(walletAddress, associatedAccounts)
 
 	for {
 		slog.Info(
@@ -710,7 +703,7 @@ func syncWallet(
 			err := parser.ParseTx(dtx)
 			assert.NoErr(err, "unable to parse tx")
 
-			for _, ix := range dtx.instructions {
+			for _, ix := range dtx.Instructions {
 				for i, event := range ix.Events {
 					eventData, err := json.Marshal(event)
 					assert.NoErr(err, "unable to serialize event")

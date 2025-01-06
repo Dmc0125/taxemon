@@ -1,12 +1,4 @@
-DROP VIEW IF EXISTS v_transaction;
-
-DROP FUNCTION IF EXISTS get_instructions;
-
-DROP FUNCTION IF EXISTS get_inner_instructions;
-
 DROP TABLE IF EXISTS associated_account;
-
-DROP TABLE IF EXISTS event;
 
 DROP TABLE IF EXISTS inner_instruction;
 

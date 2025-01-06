@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"slices"
 	"strings"
 	"taxemon/pkg/assert"
 	"taxemon/pkg/logger"
@@ -45,6 +46,10 @@ func main() {
 
 	files, err := os.ReadDir(migrationsDir)
 	assert.NoErr(err, "unable to read migrations dir")
+
+	if dir == "down" {
+		slices.Reverse(files)
+	}
 
 	for _, file := range files {
 		var suffix string

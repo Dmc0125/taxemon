@@ -4,24 +4,24 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"taxemon/pkg/assert"
+	"log/slog"
+	"slices"
 )
 
 const jupiterV6ProgramAddress = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 
 var (
+	ixJupV6Route, _               = hex.DecodeString("e517cb977ae3ad2a")
 	ixJupV6SharedAccountsRoute, _ = hex.DecodeString("c1209b3341d69c81")
 	ixJupV6Log, _                 = hex.DecodeString("e445a52e51cb9a1d")
 
 	evJupV6Swap, _ = hex.DecodeString("40c6cde8260871e2")
 )
 
-func parseJupIxIntoSwapEvent(programAddress string, innerIxs []ParsableIxBase) *EventSwap {
-	amounts := make(map[string]uint64)
+func parseJupIxIntoSwapEvent(parser *EventsParser, innerIxs []ParsableIxBase, signature string) *EventSwap {
+	amounts := make(map[string]int64)
 
 	for _, iix := range innerIxs {
-		fmt.Printf("pa %s\n", iix.ProgramAddress())
-
 		if iix.ProgramAddress() != tokenProgramAddress {
 			continue
 		}
@@ -43,18 +43,23 @@ func parseJupIxIntoSwapEvent(programAddress string, innerIxs []ParsableIxBase) *
 			continue
 		}
 
-		amount := binary.LittleEndian.Uint64(data[1:])
+		var amount int64
+		var key string
 
-		if _, ok := amounts[from]; !ok {
-			amounts[from] = -amount
+		if parser.associatedAccounts.Contains(from) {
+			amount = -int64(binary.LittleEndian.Uint64(data[1:]))
+			key = from
+		} else if parser.associatedAccounts.Contains(to) {
+			amount = int64(binary.LittleEndian.Uint64(data[1:]))
+			key = to
 		} else {
-			amounts[from] -= amount
+			continue
 		}
 
-		if _, ok := amounts[to]; !ok {
-			amounts[to] = +amount
+		if _, ok := amounts[key]; !ok {
+			amounts[key] = amount
 		} else {
-			amounts[to] += amount
+			amounts[key] += amount
 		}
 	}
 
@@ -64,50 +69,57 @@ func parseJupIxIntoSwapEvent(programAddress string, innerIxs []ParsableIxBase) *
 	for account, amount := range amounts {
 		if amount > 0 {
 			tokensIn = append(tokensIn, &SwapToken{
-				Amount:  amount,
+				Amount:  uint64(amount),
 				Account: account,
 			})
 		} else if amount < 0 {
 			tokensOut = append(tokensOut, &SwapToken{
-				Amount:  -amount,
+				Amount:  uint64(-amount),
 				Account: account,
 			})
 		}
 	}
 
-	assert.True(
-		len(tokensIn) > 0 && len(tokensOut) > 0,
-		"empty tokensOut or tokensIn",
-		"tokensIn",
-		tokensIn,
-		"tokensOut",
-		tokensOut,
-	)
+	if (len(tokensIn) != 0 && len(tokensOut) == 0) || (len(tokensIn) == 0 && len(tokensOut) != 0) {
+		slog.Warn("jupiter v6 swap with another wallet", "signature", signature)
+	}
+	if len(tokensIn) == 0 || len(tokensOut) == 0 {
+		return nil
+	}
+
 	return &EventSwap{
-		ProgramAddress: programAddress,
-		From:           tokensOut,
-		To:             tokensIn,
+		From: tokensOut,
+		To:   tokensIn,
 	}
 }
 
 func (parser *EventsParser) parseJupV6Ix(ix ParsableIx, signature string) error {
-	// data := ix.Data()
-	// if len(data) < 8 {
-	// 	return errDataTooSmall
-	// }
-	// disc := data[0:8]
+	data := ix.Data()
+	if len(data) < 8 {
+		return errDataTooSmall
+	}
+	disc := data[0:8]
 
-	// if slices.Equal(disc, ixJupV6SharedAccountsRoute) {
-	// 	accounts := ix.AccountsAddresses()
-	// 	authority := accounts[2]
+	fmt.Println(signature)
 
-	// 	if authority != walletAddress {
-	// 		return nil
-	// 	}
+	if slices.Equal(disc, ixJupV6SharedAccountsRoute) {
+		fmt.Println("shared")
+		accounts := ix.AccountsAddresses()
+		authority := accounts[2]
 
-	// 	swapEvent := parseJupIxIntoSwapEvent(jupiterV6ProgramAddress, ix.InnerIxs())
-	// 	fmt.Printf("event %#v\n", swapEvent)
-	// }
+		if authority != parser.walletAddress {
+			return nil
+		}
+
+		if swapEvent := parseJupIxIntoSwapEvent(parser, ix.InnerIxs(), signature); swapEvent != nil {
+			swapEvent.ProgramAddress = jupiterV6ProgramAddress
+			ix.AddEvent(swapEvent)
+		}
+	} else if slices.Equal(disc, ixJupV6Route) {
+		slog.Warn("unhandled ix: ixJupV6Route", "signature", signature)
+	} else {
+		slog.Warn("unhandled ix: unknown", "signature", signature)
+	}
 
 	return nil
 }

@@ -71,25 +71,6 @@ CREATE TABLE inner_instruction (
     FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (transaction_id, idx) ON DELETE CASCADE
 );
 
-CREATE TABLE event (
-    id SERIAL PRIMARY KEY,
-    transaction_id INTEGER NOT NULL,
-    ix_idx INTEGER NOT NULL,
-    idx SMALLINT NOT NULL,
-    --
-    -- 0 -> transfer
-    -- 1 -> mint
-    -- 2 -> burn
-    -- 3 -> close account
-    type SMALLINT NOT NULL,
-    -- event data stored as json string bytes
-    data JSONB NOT NULL,
-    --
-    UNIQUE (transaction_id, ix_idx),
-    FOREIGN KEY (transaction_id) REFERENCES "transaction" (id),
-    FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (transaction_id, idx) ON DELETE CASCADE
-);
-
 CREATE TABLE associated_account (
     address VARCHAR(255) NOT NULL,
     wallet_id INTEGER NOT NULL,
@@ -102,38 +83,3 @@ CREATE TABLE associated_account (
     PRIMARY KEY (address),
     FOREIGN KEY (wallet_id) REFERENCES wallet (id)
 );
-
-CREATE OR REPLACE FUNCTION get_inner_instructions(tx_id INTEGER, instruction_idx INTEGER)
-RETURNS jsonb AS $$
-    SELECT COALESCE(
-        jsonb_agg(
-            jsonb_build_object(
-                'program_id_idx', iix.program_id_idx,
-                'accounts_idxs', to_jsonb(iix.accounts_idxs),
-                'data', iix.data
-            ) ORDER BY iix.idx ASC
-        ),
-        '[]'::jsonb
-    )
-    FROM inner_instruction iix
-    WHERE iix.transaction_id = tx_id
-    AND iix.ix_idx = instruction_idx;
-$$ LANGUAGE SQL STABLE;
-
-CREATE OR REPLACE FUNCTION get_instructions(tx_id INTEGER)
-RETURNS jsonb AS $$
-    SELECT COALESCE(
-        jsonb_agg(
-            jsonb_build_object(
-                'idx', ix.idx,
-                'program_id_idx', ix.program_id_idx,
-                'accounts_idxs', to_jsonb(ix.accounts_idxs),
-                'data', ix.data,
-                'inner_ixs', get_inner_instructions(ix.transaction_id, ix.idx)
-            ) ORDER BY ix.idx ASC
-        ),
-        '[]'::jsonb
-    )
-    FROM instruction ix
-    WHERE ix.transaction_id = tx_id;
-$$ LANGUAGE SQL STABLE;

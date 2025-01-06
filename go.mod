@@ -11,7 +11,6 @@ require (
 	github.com/test-go/testify v1.1.4
 	github.com/testcontainers/testcontainers-go v0.34.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.34.0
-	golang.org/x/sync v0.10.0
 	modernc.org/sqlite v1.34.2
 )
 

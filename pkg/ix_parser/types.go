@@ -1,6 +1,10 @@
 package ixparser
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 type AssociatedAccountToken struct {
 	address string
@@ -79,4 +83,17 @@ type EventSwap struct {
 
 func (e *EventSwap) Type() uint8 {
 	return 4
+}
+
+func (e *EventSwap) String() string {
+	b := strings.Builder{}
+	b.WriteString("FROM:")
+	for _, from := range e.From {
+		b.WriteString(fmt.Sprintf("\n\t%s: %d", from.Account, from.Amount))
+	}
+	b.WriteString("\nTO:")
+	for _, to := range e.To {
+		b.WriteString(fmt.Sprintf("\n\t%s: %d", to.Account, to.Amount))
+	}
+	return b.String()
 }

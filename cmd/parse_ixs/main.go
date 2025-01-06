@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"strings"
 	"taxemon/pkg/assert"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
-	"golang.org/x/sync/errgroup"
 )
 
 type printableIx struct {
@@ -28,7 +26,7 @@ type printableIx struct {
 func ixToString(tx *walletsync.SavedTransaction, all map[string]printableIx, programs map[string]bool) {
 	signature := tx.Signature()
 
-	for _, ix := range tx.Instructions() {
+	for _, ix := range tx.GetInstructions() {
 		data := ix.Data()
 		l := 8
 		if len(data) < 8 {
@@ -50,11 +48,11 @@ func ixToString(tx *walletsync.SavedTransaction, all map[string]printableIx, pro
 	}
 }
 
-func printTxs(txs []*SelectUnknownTransactionRow) {
+func printTxs(txs []*deserializedTransaction) {
 	all := make(map[string]printableIx)
 	programs := make(map[string]bool)
 	for _, tx := range txs {
-		dtx := walletsync.DeserializeSavedTransaction(tx.SelectTransactionsRow)
+		dtx := walletsync.DeserializeSavedTransaction(tx.serialized.SelectTransactionsRow)
 		ixToString(dtx, all, programs)
 	}
 
@@ -83,53 +81,155 @@ func printTxs(txs []*SelectUnknownTransactionRow) {
 	}
 }
 
-type SelectUnknownTransactionRow struct {
+type selectUnknownTransactionsRow struct {
 	*dbutils.SelectTransactionsRow
 	Address  string
 	WalletId int32 `db:"wallet_id"`
 }
 
-func fetchTransactions(db *sqlx.DB, signature string) []*SelectUnknownTransactionRow {
-	q := strings.Builder{}
-	q.WriteString(`
+func fetchUnknownTransactions(db *sqlx.DB) []*selectUnknownTransactionsRow {
+	q := `
+		with tx_instructions as (
+		    select
+		        t.id,
+		        t.signature,
+		        t.accounts,
+		        t.logs,
+		        get_instructions(t.id, true)::jsonb as instructions,
+		        wallet.address,
+		        wallet.id as wallet_id
+		    from
+		        "transaction" t
+		    join
+		        transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
+		    join
+		        wallet on wallet.id = transaction_to_wallet.wallet_id
+		    where
+		        t.err = false
+		)
 		select
-			t.id,
-			t.signature,
-			t.accounts,
-			t.logs,
-			get_instructions(t.id, true) as instructions,
-			wallet.address,
-			wallet.id as wallet_id
+			id, signature, accounts, logs, instructions, address, wallet_id
 		from
-			"transaction" t
-		join
-			transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
-		join
-			wallet on wallet.id = transaction_to_wallet.wallet_id
-	`)
-
-	var err error
-	result := make([]*SelectUnknownTransactionRow, 0)
-	if signature == "" {
-		q.WriteString(`
-			where exists (
-				select
-					1
-				from
-					instruction ix
-				where
-					ix.is_known = false AND ix.transaction_id = t.id
-			)
-		`)
-		err = db.Select(&result, q.String())
-	} else {
-		q.WriteString(`
-			where t.signature = $1
-		`)
-		err = db.Select(&result, q.String(), signature)
-	}
-	assert.NoErr(err, "unable to fetch unknown transactions")
+			tx_instructions
+		where
+			jsonb_array_length(instructions) > 0
+	`
+	result := make([]*selectUnknownTransactionsRow, 0)
+	err := db.Select(&result, q)
+	assert.NoErr(err, "unable to fetch transactions")
 	return result
+}
+
+func fetchTransactionBySignature(db *sqlx.DB, signature string) []*selectUnknownTransactionsRow {
+	q := `
+		select
+		    t.id,
+		    t.signature,
+		    t.accounts,
+		    t.logs,
+		    get_instructions(t.id, true)::jsonb as instructions,
+		    wallet.address,
+		    wallet.id as wallet_id
+		from
+		    "transaction" t
+		join
+		    transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
+		join
+		    wallet on wallet.id = transaction_to_wallet.wallet_id
+		where
+		    t.err = false
+			and t.signature = string
+	`
+	result := new(selectUnknownTransactionsRow)
+	err := db.Get(result, q, signature)
+	assert.NoErr(err, "unable to fetch transaction")
+	return []*selectUnknownTransactionsRow{result}
+}
+
+type knownInstruction struct {
+	ProgramAddress string `db:"program_address"`
+	Discriminator  string
+	DiscLen        int16 `db:"disc_len"`
+}
+
+func fetchKnownInstructions(db *sqlx.DB) []*knownInstruction {
+	q := `
+		select
+			program_address, discriminator, disc_len
+		from
+			known_instruction
+	`
+	result := make([]*knownInstruction, 0)
+	err := db.Select(&result, q)
+	assert.NoErr(err, "unable to fetch known instructions")
+	return result
+}
+
+type deserializedTransaction struct {
+	deserialized *walletsync.SavedTransaction
+	serialized   *selectUnknownTransactionsRow
+}
+
+func isKnown(programAddress string, data []byte, knownInstructions []*knownInstruction) bool {
+	for _, ki := range knownInstructions {
+		if programAddress != ki.ProgramAddress {
+			continue
+		}
+		if len(data) < int(ki.DiscLen) {
+			continue
+		}
+		encoded := hex.EncodeToString(data)
+		disc := encoded[:ki.DiscLen]
+
+		if disc == ki.Discriminator {
+			return true
+		}
+	}
+	return false
+}
+
+func deserializeTransactions(serialized []*selectUnknownTransactionsRow) []*deserializedTransaction {
+	deserialized := make([]*deserializedTransaction, len(serialized))
+	for i, tx := range serialized {
+		deserialized[i] = &deserializedTransaction{
+			deserialized: walletsync.DeserializeSavedTransaction(tx.SelectTransactionsRow),
+			serialized:   tx,
+		}
+	}
+	return deserialized
+}
+
+func removeElement[T any](s []T, i int) []T {
+	if i == len(s)-1 {
+		return s[:i]
+	}
+	return append(s[:i], s[i+1:]...)
+}
+
+func removeKnownInstructions(
+	txs []*deserializedTransaction,
+	knownInstructions []*knownInstruction,
+) []*deserializedTransaction {
+	unknownTxs := make([]*deserializedTransaction, 0)
+	for i, tx := range txs {
+		unknownIxs := make([]*walletsync.SavedInstruction, 0)
+
+		ixs := txs[i].deserialized.Instructions
+		for _, ix := range tx.deserialized.GetInstructions() {
+			if !isKnown(ix.ProgramAddress(), ix.Data(), knownInstructions) {
+				unknownIxs = append(unknownIxs, ix.(*walletsync.SavedInstruction))
+			}
+		}
+
+		if len(ixs) == 0 {
+			txs = removeElement(txs, i)
+		} else {
+			tx.deserialized.Instructions = unknownIxs
+			unknownTxs = append(unknownTxs, txs[i])
+		}
+	}
+
+	return unknownTxs
 }
 
 func main() {
@@ -155,7 +255,16 @@ func main() {
 	db, err := sqlx.Connect("postgres", dbUrl)
 	assert.NoErr(err, "unable to open db", "dbPath", dbUrl)
 
-	txs := fetchTransactions(db, signature)
+	var txs []*deserializedTransaction
+	if signature == "" {
+		known := fetchKnownInstructions(db)
+		txs = removeKnownInstructions(
+			deserializeTransactions(fetchUnknownTransactions(db)),
+			known,
+		)
+	} else {
+		txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
+	}
 
 	if len(txs) == 0 {
 		slog.Info("transactions empty")
@@ -167,17 +276,17 @@ func main() {
 		return
 	}
 
-	txsByWallet := make(map[int32][]*SelectUnknownTransactionRow, 0)
+	txsByWallet := make(map[int32][]*deserializedTransaction, 0)
 	for _, tx := range txs {
-		_, ok := txsByWallet[tx.WalletId]
+		walletId := tx.serialized.WalletId
+		_, ok := txsByWallet[walletId]
 		if ok {
-			txsByWallet[tx.WalletId] = append(txsByWallet[tx.WalletId], tx)
+			txsByWallet[walletId] = append(txsByWallet[walletId], tx)
 		} else {
-			txsByWallet[tx.WalletId] = []*SelectUnknownTransactionRow{tx}
+			txsByWallet[walletId] = []*deserializedTransaction{tx}
 		}
 	}
 
-	updateIxsParams := make([]*dbutils.UpdateInstructionToKnownParams, 0)
 	insertableEvents := make([]*dbutils.InsertEventParams, 0)
 
 	for walletId, txs := range txsByWallet {
@@ -185,30 +294,22 @@ func main() {
 		associatedAccounts.FetchExisting(db, walletId)
 
 		for _, tx := range txs {
-			dtx := walletsync.DeserializeSavedTransaction(tx.SelectTransactionsRow)
-
-			currentAssociatedAccounts, err := ixparser.ParseTx(dtx, tx.Address)
+			dtx := tx.deserialized
+			parser := ixparser.NewEventsParser(tx.serialized.Address, associatedAccounts)
+			err := parser.ParseTx(dtx)
 			assert.NoErr(err, "unable to parse tx")
 
-			maps.Insert(associatedAccounts.CurrentIter, maps.All(currentAssociatedAccounts))
-
-			for _, ixInterface := range dtx.Instructions() {
+			for _, ixInterface := range dtx.GetInstructions() {
 				ix := ixInterface.(*walletsync.SavedInstruction)
-				if !ix.IsKnown {
-					continue
-				}
-
-				updateIxsParams = append(updateIxsParams, &dbutils.UpdateInstructionToKnownParams{
-					TransactionId: tx.Id,
-					Idx:           ix.Idx,
-				})
 
 				for i, event := range ix.Events {
 					eventSerialized, err := json.Marshal(event)
 					assert.NoErr(err, "unable to serialize event", "event data", event)
 
+					fmt.Println(string(eventSerialized))
+
 					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
-						TransactionId: tx.Id,
+						TransactionId: tx.serialized.Id,
 						IxIdx:         ix.Idx,
 						Idx:           int16(i),
 						Type:          int16(event.Type()),
@@ -219,31 +320,9 @@ func main() {
 		}
 	}
 
-	tx, err := db.Beginx()
-	assert.NoErr(err, "unable to begin tx")
-
-	if !save {
-		return
+	if len(insertableEvents) > 0 && save {
+		err = dbutils.InsertEvents(db, insertableEvents)
+		assert.NoErr(err, "unable to insert events")
+		slog.Info("succesfully inserted ixs")
 	}
-	if len(updateIxsParams) == 0 {
-		return
-	}
-
-	var eg errgroup.Group
-	eg.TryGo(func() error {
-		if err = dbutils.UpdateInstructionsToKnown(tx, updateIxsParams); err != nil {
-			return fmt.Errorf("unable to update instructions to known: %w", err)
-		}
-		return nil
-	})
-	eg.TryGo(func() error {
-		if err = dbutils.InsertEvents(tx, insertableEvents); err != nil {
-			return fmt.Errorf("unable to insert events: %w", err)
-		}
-		return nil
-	})
-	err = eg.Wait()
-	assert.NoErr(err, "")
-
-	slog.Info("succesfully parsed ixs")
 }

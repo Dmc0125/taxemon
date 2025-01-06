@@ -29,7 +29,7 @@ type ParsableIx interface {
 
 type ParsableTx interface {
 	Signature() string
-	Instructions() iter.Seq2[int, ParsableIx]
+	GetInstructions() iter.Seq2[int, ParsableIx]
 	Logs() iter.Seq2[int, string]
 }
 
@@ -41,6 +41,7 @@ type AssociatedAccount interface {
 
 type AssociatedAccounts interface {
 	Append(AssociatedAccount)
+	Contains(string) bool
 }
 
 const (
@@ -48,7 +49,7 @@ const (
 )
 
 func ParseAssociatedAccounts(associatedAccounts AssociatedAccounts, tx ParsableTx, walletAddress string) error {
-	for _, ix := range tx.Instructions() {
+	for _, ix := range tx.GetInstructions() {
 		var err error
 		switch ix.ProgramAddress() {
 		case tokenProgramAddress:
@@ -66,15 +67,23 @@ func ParseAssociatedAccounts(associatedAccounts AssociatedAccounts, tx ParsableT
 }
 
 type EventsParser struct {
-	WalletAddress string
+	walletAddress      string
+	associatedAccounts AssociatedAccounts
+}
+
+func NewEventsParser(walletAddress string, associatedAccounts AssociatedAccounts) *EventsParser {
+	return &EventsParser{
+		walletAddress,
+		associatedAccounts,
+	}
 }
 
 func (parser *EventsParser) isRelated(accounts ...string) bool {
-	return slices.Contains(accounts, parser.WalletAddress)
+	return slices.Contains(accounts, parser.walletAddress)
 }
 
 func (parser *EventsParser) ParseTx(tx ParsableTx) error {
-	for _, ix := range tx.Instructions() {
+	for _, ix := range tx.GetInstructions() {
 		var err error
 
 		switch ix.ProgramAddress() {
