@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
-	"maps"
 	"slices"
 	"strings"
 	"taxemon/pkg/assert"
@@ -97,8 +96,6 @@ type insertableInstruction struct {
 	*insertableInstructionBase
 	innerInstructions []*insertableInstructionBase
 }
-
-func (ix *insertableInstruction) AddEvent(_ ixparser.Event) {}
 
 func (ix *insertableInstruction) InnerIxs() []ixparser.ParsableIxBase {
 	iixs := make([]ixparser.ParsableIxBase, len(ix.innerInstructions))
@@ -303,7 +300,6 @@ type SavedInstruction struct {
 	*SavedInstructionBase
 	Idx               int32
 	innerInstructions []*SavedInstructionBase
-	Events            []ixparser.Event
 }
 
 func (ix *SavedInstruction) InnerIxs() []ixparser.ParsableIxBase {
@@ -312,10 +308,6 @@ func (ix *SavedInstruction) InnerIxs() []ixparser.ParsableIxBase {
 		iixs[i] = iix
 	}
 	return iixs
-}
-
-func (ix *SavedInstruction) AddEvent(event ixparser.Event) {
-	ix.Events = append(ix.Events, event)
 }
 
 type SavedTransaction struct {
@@ -431,23 +423,25 @@ func fixTimestampDuplicates(rpcClient *rpc.Client, db *sqlx.DB) error {
 	return nil
 }
 
-type AssociatedAccounts struct {
-	CurrentIter map[string]ixparser.AssociatedAccount
-	all         map[string]string
+type associatedAccountsState struct {
+	CurrentIter    map[string]ixparser.AssociatedAccount
+	all            map[string]ixparser.AssociatedAccount
+	lastSignatures map[string]string
 }
 
-func NewAssociatedAccounts() *AssociatedAccounts {
-	return &AssociatedAccounts{
-		CurrentIter: make(map[string]ixparser.AssociatedAccount),
-		all:         make(map[string]string),
+func NewAssociatedAccounts() *associatedAccountsState {
+	return &associatedAccountsState{
+		CurrentIter:    make(map[string]ixparser.AssociatedAccount),
+		all:            make(map[string]ixparser.AssociatedAccount),
+		lastSignatures: make(map[string]string),
 	}
 }
 
-func (a *AssociatedAccounts) Append(account ixparser.AssociatedAccount) {
+func (a *associatedAccountsState) Append(account ixparser.AssociatedAccount) {
 	a.CurrentIter[account.Address()] = account
 }
 
-func (a *AssociatedAccounts) Contains(address string) bool {
+func (a *associatedAccountsState) Contains(address string) bool {
 	_, ok := a.CurrentIter[address]
 	if !ok {
 		_, ok = a.all[address]
@@ -455,19 +449,49 @@ func (a *AssociatedAccounts) Contains(address string) bool {
 	return ok
 }
 
-func (a *AssociatedAccounts) AppendCurrent(current map[string]ixparser.AssociatedAccount) {
-	maps.Insert(a.CurrentIter, maps.All(current))
+func (a *associatedAccountsState) Get(address string) ixparser.AssociatedAccount {
+	account, ok := a.CurrentIter[address]
+	if !ok {
+		account, ok := a.all[address]
+		if !ok {
+			return nil
+		}
+		return account
+	}
+	return account
 }
 
-func (a *AssociatedAccounts) FetchExisting(db *sqlx.DB, walletId int32) {
+func (a *associatedAccountsState) FetchExisting(db *sqlx.DB, walletId int32) {
 	associatedAccounts, err := dbutils.SelectAssociatedAccounts(db, walletId)
 	assert.NoErr(err, "unable to select associated accounts")
-	for _, aa := range associatedAccounts {
-		a.all[aa.Address] = aa.LastSignature.String
+	for _, account := range associatedAccounts {
+		switch account.Type {
+		case dbutils.AssociatedAccountToken:
+			data := make(map[string]string)
+			if account.Data.Valid {
+				err := json.Unmarshal([]byte(account.Data.String), &data)
+				assert.NoErr(err, "unable to unmarshal associated account token data")
+			}
+			a.all[account.Address] = ixparser.NewAssociatedAccountToken(account.Address, data["mint"], account.ShouldFetch)
+			a.lastSignatures[account.Address] = account.LastSignature.String
+		case dbutils.AssociatedAccountJupLimit:
+			data := make(map[string]string)
+			if account.Data.Valid {
+				err := json.Unmarshal([]byte(account.Data.String), &data)
+				assert.NoErr(err, "unable to unmarshal associated account jup limit data")
+			}
+
+			a.all[account.Address] = ixparser.NewAssociatedAccountJupLimit(
+				account.Address,
+				data["accountIn"],
+				data["accountOut"],
+			)
+			a.lastSignatures[account.Address] = account.LastSignature.String
+		}
 	}
 }
 
-func (a *AssociatedAccounts) Flush() []ixparser.AssociatedAccount {
+func (a *associatedAccountsState) Flush() []ixparser.AssociatedAccount {
 	if len(a.CurrentIter) == 0 {
 		return nil
 	}
@@ -477,7 +501,8 @@ func (a *AssociatedAccounts) Flush() []ixparser.AssociatedAccount {
 		_, ok := a.all[address]
 		if !ok {
 			new = append(new, account)
-			a.all[address] = ""
+			a.all[address] = account
+			a.lastSignatures[address] = ""
 		}
 	}
 	a.CurrentIter = make(map[string]ixparser.AssociatedAccount)
@@ -489,7 +514,7 @@ type Fetcher struct {
 	db        *sqlx.DB
 	config    *rpc.GetSignaturesForAddressConfig
 
-	associatedAccounts *AssociatedAccounts
+	associatedAccounts *associatedAccountsState
 	address            string
 	latestSignature    string
 }
@@ -497,7 +522,7 @@ type Fetcher struct {
 func newFetcher(
 	rpcClient *rpc.Client,
 	db *sqlx.DB,
-	associatedAccounts *AssociatedAccounts,
+	associatedAccounts *associatedAccountsState,
 	address, lastSignature string,
 ) *Fetcher {
 	l := uint64(1000)
@@ -579,10 +604,41 @@ func (f *Fetcher) fetchNext() (bool, []*insertableTransaction, []*dbutils.Select
 	return hasNext, insertableTransactions, savedTransactions
 }
 
+func insertAssociatedAccounts(tx *sqlx.Tx, associatedAccounts *associatedAccountsState, walletId int32) {
+	flushed := associatedAccounts.Flush()
+	if len(flushed) == 0 {
+		return
+	}
+
+	slog.Info("inserting associated accounts")
+	insertableAssociatedAccounts := make([]*dbutils.InsertAssociatedAccountParams, len(flushed))
+	for i, account := range flushed {
+		data, err := account.Data()
+		assert.NoErr(err, "unable to serialize associated account")
+
+		dataInsertable := sql.NullString{}
+		if data != nil {
+			dataInsertable.Valid = true
+			dataInsertable.String = string(data)
+		}
+
+		insertableAssociatedAccounts[i] = &dbutils.InsertAssociatedAccountParams{
+			WalletId:    walletId,
+			Data:        dataInsertable,
+			Address:     account.Address(),
+			Type:        account.Type(),
+			ShouldFetch: account.ShouldFetch(),
+		}
+	}
+
+	err := dbutils.InsertAssociatedAccounts(tx, insertableAssociatedAccounts)
+	assert.NoErr(err, "unable to insert associated accounts")
+}
+
 func fetchTransactionsForAddress(
 	rpcClient *rpc.Client,
 	db *sqlx.DB,
-	associatedAccounts *AssociatedAccounts,
+	associatedAccounts *associatedAccountsState,
 	walletId int32,
 	address string,
 	lastSignature string,
@@ -625,22 +681,7 @@ func fetchTransactionsForAddress(
 		}
 
 		if !isAssociatedAccount {
-			if flushed := associatedAccounts.Flush(); len(flushed) > 0 {
-				insertableAssociatedAccounts := make([]*dbutils.InsertAssociatedAccountParams, len(flushed))
-				for i, account := range flushed {
-					data, err := account.Data()
-					assert.NoErr(err, "unable to serialize associated account")
-					insertableAssociatedAccounts[i] = &dbutils.InsertAssociatedAccountParams{
-						WalletId: walletId,
-						Address:  account.Address(),
-						Type:     int16(account.Type()),
-						Data:     string(data),
-					}
-				}
-				slog.Info("inserting associated accounts")
-				err = dbutils.InsertAssociatedAccounts(tx, insertableAssociatedAccounts)
-				assert.NoErr(err, "unable to insert associated accounts")
-			}
+			insertAssociatedAccounts(tx, associatedAccounts, walletId)
 		}
 
 		err = tx.Commit()
@@ -665,7 +706,12 @@ func syncWallet(
 	slog.Info("fetching transactions for main wallet", "address", walletAddress)
 	fetchTransactionsForAddress(rpcClient, db, associatedAccounts, walletId, walletAddress, lastSignature)
 
-	for address, lastSignature := range associatedAccounts.all {
+	for address, account := range associatedAccounts.all {
+		if !account.ShouldFetch() {
+			continue
+		}
+		lastSignature := associatedAccounts.lastSignatures[address]
+
 		slog.Info("fetching transactions for associated account", "address", address)
 		fetchTransactionsForAddress(rpcClient, db, nil, walletId, address, lastSignature)
 	}
@@ -700,22 +746,20 @@ func syncWallet(
 		for _, tx := range transactions {
 			dtx := DeserializeSavedTransaction(tx.SelectTransactionsRow)
 
-			err := parser.ParseTx(dtx)
+			events, err := parser.ParseTx(dtx)
 			assert.NoErr(err, "unable to parse tx")
 
-			for _, ix := range dtx.Instructions {
-				for i, event := range ix.Events {
-					eventData, err := json.Marshal(event)
-					assert.NoErr(err, "unable to serialize event")
+			for _, event := range events {
+				eventData, err := json.Marshal(event.Data)
+				assert.NoErr(err, "unable to serialize event")
 
-					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
-						TransactionId: tx.Id,
-						IxIdx:         ix.Idx,
-						Idx:           int16(i),
-						Type:          int16(event.Type()),
-						Data:          string(eventData),
-					})
-				}
+				insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
+					TransactionId: tx.Id,
+					IxIdx:         event.IxIdx,
+					Idx:           event.Idx,
+					Type:          int16(event.Data.Type()),
+					Data:          string(eventData),
+				})
 			}
 		}
 

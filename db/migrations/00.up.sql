@@ -71,13 +71,14 @@ CREATE TABLE inner_instruction (
     FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (transaction_id, idx) ON DELETE CASCADE
 );
 
+CREATE TYPE associated_account_type AS ENUM('token', 'jup_limit');
+
 CREATE TABLE associated_account (
     address VARCHAR(255) NOT NULL,
     wallet_id INTEGER NOT NULL,
     last_signature VARCHAR(255),
-    --
-    -- 0 -> token account
-    type SMALLINT NOT NULL,
+    should_fetch BOOL NOT NULL,
+    type associated_account_type NOT NULL,
     data JSONB,
     --
     PRIMARY KEY (address),

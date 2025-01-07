@@ -1,5 +1,7 @@
 DROP TABLE IF EXISTS associated_account;
 
+DROP TYPE IF EXISTS associated_account_type;
+
 DROP TABLE IF EXISTS inner_instruction;
 
 DROP TABLE IF EXISTS instruction;

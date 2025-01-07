@@ -12,7 +12,7 @@ CREATE TABLE event (
     -- event data stored as json string bytes
     data JSONB NOT NULL,
     --
-    UNIQUE (transaction_id, ix_idx),
+    UNIQUE (transaction_id, ix_idx, idx),
     FOREIGN KEY (transaction_id) REFERENCES "transaction" (id),
     FOREIGN KEY (transaction_id, ix_idx) REFERENCES instruction (transaction_id, idx) ON DELETE CASCADE
 );
@@ -46,7 +46,7 @@ RETURNS jsonb AS $$
         iix.ix_idx = instruction_idx;
 $$ LANGUAGE SQL STABLE;
 
-CREATE OR REPLACE FUNCTION get_instructions(tx_id INTEGER)
+CREATE OR REPLACE FUNCTION get_instructions(tx_id INTEGER, unknown_only BOOLEAN DEFAULT false)
 RETURNS jsonb AS $$
     SELECT
         COALESCE(

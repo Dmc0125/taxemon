@@ -3,7 +3,6 @@ package ixparser
 import (
 	"encoding/binary"
 	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"slices"
 )
@@ -93,27 +92,24 @@ func parseJupIxIntoSwapEvent(parser *EventsParser, innerIxs []ParsableIxBase, si
 	}
 }
 
-func (parser *EventsParser) parseJupV6Ix(ix ParsableIx, signature string) error {
+func (parser *EventsParser) parseJupV6Ix(ix ParsableIx, signature string) (EventData, error) {
 	data := ix.Data()
 	if len(data) < 8 {
-		return errDataTooSmall
+		return nil, errDataTooSmall
 	}
 	disc := data[0:8]
 
-	fmt.Println(signature)
-
 	if slices.Equal(disc, ixJupV6SharedAccountsRoute) {
-		fmt.Println("shared")
 		accounts := ix.AccountsAddresses()
 		authority := accounts[2]
 
 		if authority != parser.walletAddress {
-			return nil
+			return nil, nil
 		}
 
 		if swapEvent := parseJupIxIntoSwapEvent(parser, ix.InnerIxs(), signature); swapEvent != nil {
 			swapEvent.ProgramAddress = jupiterV6ProgramAddress
-			ix.AddEvent(swapEvent)
+			return swapEvent, nil
 		}
 	} else if slices.Equal(disc, ixJupV6Route) {
 		slog.Warn("unhandled ix: ixJupV6Route", "signature", signature)
@@ -121,5 +117,5 @@ func (parser *EventsParser) parseJupV6Ix(ix ParsableIx, signature string) error 
 		slog.Warn("unhandled ix: unknown", "signature", signature)
 	}
 
-	return nil
+	return nil, nil
 }

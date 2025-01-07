@@ -7,7 +7,11 @@ import (
 
 const associatedTokenProgramAddress = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 
-func parseAssociatedTokenIxAssociatedAccounts(associatedAccounts AssociatedAccounts, ix ParsableIx, walletAddress string) error {
+func parseAssociatedTokenIxAssociatedAccounts(
+	associatedAccounts AssociatedAccounts,
+	ix ParsableIx,
+	walletAddress string,
+) error {
 	data := ix.Data()
 	isCreate := len(data) == 0 || data[0] == 0 || data[0] == 1
 
@@ -20,8 +24,9 @@ func parseAssociatedTokenIxAssociatedAccounts(associatedAccounts AssociatedAccou
 		owner := accounts[2]
 		if owner == walletAddress {
 			associatedAccounts.Append(&AssociatedAccountToken{
-				address: accounts[1],
-				mint:    accounts[3],
+				address:     accounts[1],
+				mint:        accounts[3],
+				shouldFetch: true,
 			})
 			return nil
 		}
@@ -30,7 +35,7 @@ func parseAssociatedTokenIxAssociatedAccounts(associatedAccounts AssociatedAccou
 	return nil
 }
 
-func (parser *EventsParser) parseAssociatedTokenIxEvents(ix ParsableIx, signature string) error {
+func (parser *EventsParser) parseAssociatedTokenIxEvents(ix ParsableIx, signature string) (EventData, error) {
 	data := ix.Data()
 	isCreate := len(data) == 0 || data[0] == 0 || data[0] == 1
 
@@ -40,19 +45,19 @@ func (parser *EventsParser) parseAssociatedTokenIxEvents(ix ParsableIx, signatur
 		innerIxsLen := len(innerIxs)
 
 		if innerIxsLen == 0 {
-			return nil
+			return nil, nil
 		}
 
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 3 {
-			return errAccountsTooSmall
+			return nil, errAccountsTooSmall
 		}
 
 		from := accounts[0]
 		to := accounts[1]
 
 		if !parser.isRelated(from) {
-			return nil
+			return nil, nil
 		}
 
 		if innerIxsLen == 4 || innerIxsLen == 6 {
@@ -62,18 +67,19 @@ func (parser *EventsParser) parseAssociatedTokenIxEvents(ix ParsableIx, signatur
 			data := createAccountIx.Data()[4:]
 			lamports := binary.LittleEndian.Uint64(data)
 
-			ix.AddEvent(&EventTransfer{
+			event := &EventTransfer{
 				ProgramAddress: associatedTokenProgramAddress,
 				From:           from,
 				To:             to,
 				Amount:         lamports,
 				IsRent:         true,
-			})
+			}
+			return event, nil
 		}
 	} else {
 		// RECOVER NESTED
 		slog.Error("unimplemented associated token instruction (recover nested)", "signature", signature)
 	}
 
-	return nil
+	return nil, nil
 }

@@ -296,26 +296,22 @@ func main() {
 		for _, tx := range txs {
 			dtx := tx.deserialized
 			parser := ixparser.NewEventsParser(tx.serialized.Address, associatedAccounts)
-			err := parser.ParseTx(dtx)
+			events, err := parser.ParseTx(dtx)
 			assert.NoErr(err, "unable to parse tx")
 
-			for _, ixInterface := range dtx.GetInstructions() {
-				ix := ixInterface.(*walletsync.SavedInstruction)
+			for _, event := range events {
+				eventSerialized, err := json.Marshal(event.Data)
+				assert.NoErr(err, "unable to serialize event", "event data", event)
 
-				for i, event := range ix.Events {
-					eventSerialized, err := json.Marshal(event)
-					assert.NoErr(err, "unable to serialize event", "event data", event)
+				fmt.Println(string(eventSerialized))
 
-					fmt.Println(string(eventSerialized))
-
-					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
-						TransactionId: tx.serialized.Id,
-						IxIdx:         ix.Idx,
-						Idx:           int16(i),
-						Type:          int16(event.Type()),
-						Data:          string(eventSerialized),
-					})
-				}
+				insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
+					TransactionId: tx.serialized.Id,
+					IxIdx:         event.IxIdx,
+					Idx:           event.Idx,
+					Type:          int16(event.Data.Type()),
+					Data:          string(eventSerialized),
+				})
 			}
 		}
 	}

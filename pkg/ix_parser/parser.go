@@ -4,6 +4,7 @@ import (
 	"errors"
 	"iter"
 	"slices"
+	dbutils "taxemon/pkg/db_utils"
 )
 
 var (
@@ -11,8 +12,14 @@ var (
 	errAccountsTooSmall = errors.New("accounts too small")
 )
 
-type Event interface {
+type EventData interface {
 	Type() uint8
+}
+
+type ParsedEvent struct {
+	IxIdx int32
+	Idx   int16
+	Data  EventData
 }
 
 type ParsableIxBase interface {
@@ -24,7 +31,6 @@ type ParsableIxBase interface {
 type ParsableIx interface {
 	ParsableIxBase
 	InnerIxs() []ParsableIxBase
-	AddEvent(Event)
 }
 
 type ParsableTx interface {
@@ -35,13 +41,15 @@ type ParsableTx interface {
 
 type AssociatedAccount interface {
 	Address() string
-	Type() uint8
+	Type() dbutils.AssociatedAccountType
 	Data() ([]byte, error)
+	ShouldFetch() bool
 }
 
 type AssociatedAccounts interface {
 	Append(AssociatedAccount)
 	Contains(string) bool
+	Get(string) AssociatedAccount
 }
 
 const (
@@ -53,9 +61,11 @@ func ParseAssociatedAccounts(associatedAccounts AssociatedAccounts, tx ParsableT
 		var err error
 		switch ix.ProgramAddress() {
 		case tokenProgramAddress:
-			err = parseTokenIxAssociatedAccounts(associatedAccounts, ix)
+			err = parseTokenIxAssociatedAccounts(associatedAccounts, ix, walletAddress)
 		case associatedTokenProgramAddress:
 			err = parseAssociatedTokenIxAssociatedAccounts(associatedAccounts, ix, walletAddress)
+		case jupLimitProgramAddress:
+			err = parseJupLimitIxAssociatedAccounts(associatedAccounts, ix, walletAddress)
 		}
 
 		if err != nil {
@@ -82,27 +92,59 @@ func (parser *EventsParser) isRelated(accounts ...string) bool {
 	return slices.Contains(accounts, parser.walletAddress)
 }
 
-func (parser *EventsParser) ParseTx(tx ParsableTx) error {
-	for _, ix := range tx.GetInstructions() {
+type parsedEvents []*ParsedEvent
+
+func (evts *parsedEvents) append(ixIdx int, events ...EventData) {
+	for i, e := range events {
+		*evts = append(*evts, &ParsedEvent{
+			IxIdx: int32(ixIdx),
+			Idx:   int16(i),
+			Data:  e,
+		})
+	}
+}
+
+func (parser *EventsParser) ParseTx(tx ParsableTx) ([]*ParsedEvent, error) {
+	events := parsedEvents([]*ParsedEvent{})
+
+	for i, ix := range tx.GetInstructions() {
 		var err error
+		// dont use index from loop but from ix
 
 		switch ix.ProgramAddress() {
 		case computeBudgetProgramAddress:
 			//
 		case systemProgramAddress:
-			err = parser.parseSystemIxEvents(ix)
+			var event EventData
+			if event, err = parser.parseSystemIxEvents(ix); event != nil {
+				events.append(i, event)
+			}
 		case tokenProgramAddress:
-			err = parser.parseTokenIxEvents(ix)
+			var event EventData
+			if event, err = parser.parseTokenIxEvents(ix); event != nil {
+				events.append(i, event)
+			}
 		case associatedTokenProgramAddress:
-			err = parser.parseAssociatedTokenIxEvents(ix, tx.Signature())
+			var event EventData
+			if event, err = parser.parseAssociatedTokenIxEvents(ix, tx.Signature()); event != nil {
+				events.append(i, event)
+			}
 		case jupiterV6ProgramAddress:
-			err = parser.parseJupV6Ix(ix, tx.Signature())
+			var event EventData
+			if event, err = parser.parseJupV6Ix(ix, tx.Signature()); event != nil {
+				events.append(i, event)
+			}
+		case jupLimitProgramAddress:
+			var currentEvents []EventData
+			if currentEvents, err = parser.parseJupLimitIx(ix, tx.Signature()); currentEvents != nil {
+				events.append(i, currentEvents...)
+			}
 		}
 
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return events, nil
 }

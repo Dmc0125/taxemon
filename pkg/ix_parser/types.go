@@ -1,30 +1,9 @@
 package ixparser
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 )
-
-type AssociatedAccountToken struct {
-	address string
-	mint    string
-}
-
-func (account *AssociatedAccountToken) Address() string {
-	return account.address
-}
-
-func (account *AssociatedAccountToken) Type() uint8 {
-	return 0
-}
-
-func (account *AssociatedAccountToken) Data() ([]byte, error) {
-	d := map[string]interface{}{
-		"mint": account.mint,
-	}
-	return json.Marshal(d)
-}
 
 type EventTransfer struct {
 	ProgramAddress string `json:"program_address"`

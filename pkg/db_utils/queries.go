@@ -192,6 +192,11 @@ func InsertEvents(db DBTX, params []*InsertEventParams) error {
 			event (transaction_id, ix_idx, idx, type, data)
 		values
 			(:transaction_id, :ix_idx, :idx, :type, :data)
+		on conflict (transaction_id, ix_idx, idx)
+		do update set
+			idx = EXCLUDED.idx,
+			type = EXCLUDED.type,
+			data = EXCLUDED.data
 	`
 	_, err := db.NamedExec(q, params)
 	return err
@@ -216,19 +221,27 @@ func InsertTransactionsToWallet(db DBTX, walletId int32, transactionsIds []int32
 	return err
 }
 
+type AssociatedAccountType string
+
+const (
+	AssociatedAccountToken    AssociatedAccountType = "token"
+	AssociatedAccountJupLimit AssociatedAccountType = "jup_limit"
+)
+
 type InsertAssociatedAccountParams struct {
-	WalletId int32 `db:"wallet_id"`
-	Address  string
-	Type     int16
-	Data     string
+	WalletId    int32 `db:"wallet_id"`
+	Address     string
+	Type        AssociatedAccountType
+	Data        sql.NullString
+	ShouldFetch bool `db:"should_fetch"`
 }
 
 func InsertAssociatedAccounts(db DBTX, params []*InsertAssociatedAccountParams) error {
 	q := `
 		insert into
-			associated_account (wallet_id, address, type, data)
+			associated_account (wallet_id, address, type, data, should_fetch)
 		values
-			(:wallet_id, :address, :type, :data)
+			(:wallet_id, :address, :type, :data, :should_fetch)
 	`
 	_, err := db.NamedExec(q, params)
 	return err
@@ -307,15 +320,17 @@ func UpdateTransactionsBlockIndexes(db DBTX, signatures []string, blockIndexes [
 
 type SelectAssociatedAccountsRow struct {
 	Address       string
+	Type          AssociatedAccountType
+	Data          sql.NullString
 	LastSignature sql.NullString `db:"last_signature"`
+	ShouldFetch   bool           `db:"should_fetch"`
 }
 
 func SelectAssociatedAccounts(db DBTX, walletId int32) ([]*SelectAssociatedAccountsRow, error) {
 	result := make([]*SelectAssociatedAccountsRow, 0)
 	q := `
 		SELECT
-		    address,
-		    last_signature
+		    address, type, data, last_signature, should_fetch
 		FROM
 		    associated_account
 		WHERE

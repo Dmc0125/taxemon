@@ -14,10 +14,10 @@ const (
 	ixSystemTransferWithSeed     = 11
 )
 
-func (parser *EventsParser) parseSystemIxEvents(ix ParsableIx) error {
+func (parser *EventsParser) parseSystemIxEvents(ix ParsableIx) (EventData, error) {
 	dataWithDisc := ix.Data()
 	if len(dataWithDisc) < 1 {
-		return errDataTooSmall
+		return nil, errDataTooSmall
 	}
 
 	data := dataWithDisc[1:]
@@ -26,104 +26,109 @@ func (parser *EventsParser) parseSystemIxEvents(ix ParsableIx) error {
 	case ixSystemCreateAccount:
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 2 {
-			return errAccountsTooSmall
+			return nil, errAccountsTooSmall
 		}
 
 		from := accounts[0]
 		to := accounts[1]
 
 		if !parser.isRelated(from, to) {
-			return nil
+			return nil, nil
 		}
 
 		if len(data) < 8 {
-			return errDataTooSmall
+			return nil, errDataTooSmall
 		}
 		lamports := binary.LittleEndian.Uint64(data)
 
-		ix.AddEvent(&EventTransfer{
+		event := &EventTransfer{
 			IsRent: true,
 			From:   from,
 			To:     to,
 			Amount: lamports,
-		})
+		}
+		return event, nil
 	case ixSystemWithdrawNonceAccount:
 		fallthrough
 	case ixSystemTransfer:
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 2 {
-			return errAccountsTooSmall
+			return nil, errAccountsTooSmall
 		}
 
 		from := accounts[0]
 		to := accounts[1]
 
 		if !parser.isRelated(from, to) {
-			return nil
+			return nil, nil
 		}
 
 		if len(data) < 8 {
-			return errDataTooSmall
+			return nil, errDataTooSmall
 		}
 		lamports := binary.LittleEndian.Uint64(data)
 
-		ix.AddEvent(&EventTransfer{
+		event := &EventTransfer{
 			IsRent: false,
 			From:   from,
 			To:     to,
 			Amount: lamports,
-		})
+		}
+		return event, nil
 	case ixSystemCreateWithSeed:
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 2 {
-			return errAccountsTooSmall
+			return nil, errAccountsTooSmall
 		}
 		from := accounts[0]
 		to := accounts[1]
 
 		if !parser.isRelated(from, to) {
-			return nil
+			return nil, nil
 		}
 
 		if len(data) < 40 {
-			return errDataTooSmall
+			return nil, errDataTooSmall
 		}
 		seedLen := binary.LittleEndian.Uint32(data[32:])
 		seedPadding := binary.LittleEndian.Uint32(data[36:])
 		if len(data) < 40+int(seedLen+seedPadding) {
-			return errDataTooSmall
+			return nil, errDataTooSmall
 		}
 		lamports := binary.LittleEndian.Uint64(data[40+seedLen+seedPadding:])
 
-		ix.AddEvent(&EventTransfer{
+		event := &EventTransfer{
 			IsRent: true,
 			From:   from,
 			To:     to,
 			Amount: lamports,
-		})
+		}
+		return event, nil
 	case ixSystemTransferWithSeed:
 		accounts := ix.AccountsAddresses()
 		if len(accounts) < 3 {
-			return errAccountsTooSmall
+			return nil, errAccountsTooSmall
 		}
 		from := accounts[0]
 		to := accounts[2]
 
 		if !parser.isRelated(from, to) {
-			return nil
+			return nil, nil
 		}
 
 		if len(data) < 8 {
-			return errDataTooSmall
+			return nil, errDataTooSmall
 		}
 		lamports := binary.LittleEndian.Uint64(data)
 
-		ix.AddEvent(&EventTransfer{
+		event := &EventTransfer{
 			IsRent: false,
 			From:   from,
 			To:     to,
 			Amount: lamports,
-		})
+		}
+		return event, nil
+	default:
+		return nil, nil
 	}
-	return nil
 }
