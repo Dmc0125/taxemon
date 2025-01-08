@@ -182,7 +182,7 @@ type InsertEventParams struct {
 	TransactionId int32 `db:"transaction_id"`
 	IxIdx         int32 `db:"ix_idx"`
 	Idx           int16
-	Type          int16
+	Type          EventType
 	Data          string
 }
 

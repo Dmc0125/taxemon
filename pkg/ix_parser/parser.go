@@ -13,7 +13,7 @@ var (
 )
 
 type EventData interface {
-	Type() uint8
+	Type() dbutils.EventType
 }
 
 type ParsedEvent struct {
@@ -129,15 +129,25 @@ func (parser *EventsParser) ParseTx(tx ParsableTx) ([]*ParsedEvent, error) {
 			if event, err = parser.parseAssociatedTokenIxEvents(ix, tx.Signature()); event != nil {
 				events.append(i, event)
 			}
-		case jupiterV6ProgramAddress:
+		case jupV6ProgramAddress:
 			var event EventData
 			if event, err = parser.parseJupV6Ix(ix, tx.Signature()); event != nil {
+				events.append(i, event)
+			}
+		case jupV4PogramAddress:
+			var event EventData
+			if event, err = parser.parseJupV4Ix(ix, tx.Signature()); event != nil {
 				events.append(i, event)
 			}
 		case jupLimitProgramAddress:
 			var currentEvents []EventData
 			if currentEvents, err = parser.parseJupLimitIx(ix, tx.Signature()); currentEvents != nil {
 				events.append(i, currentEvents...)
+			}
+		case bubblegumProgramAddress:
+			var event EventData
+			if event, err = parser.parseBubblegumIx(ix, tx.Signature()); event != nil {
+				events.append(i, event)
 			}
 		}
 

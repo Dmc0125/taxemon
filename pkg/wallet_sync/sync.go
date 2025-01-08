@@ -757,7 +757,7 @@ func syncWallet(
 					TransactionId: tx.Id,
 					IxIdx:         event.IxIdx,
 					Idx:           event.Idx,
-					Type:          int16(event.Data.Type()),
+					Type:          event.Data.Type(),
 					Data:          string(eventData),
 				})
 			}

@@ -3,6 +3,7 @@ package ixparser
 import (
 	"fmt"
 	"strings"
+	dbutils "taxemon/pkg/db_utils"
 )
 
 type EventTransfer struct {
@@ -13,8 +14,8 @@ type EventTransfer struct {
 	Amount         uint64 `json:"amount"`
 }
 
-func (e *EventTransfer) Type() uint8 {
-	return 0
+func (e *EventTransfer) Type() dbutils.EventType {
+	return dbutils.EventTypeTransfer
 }
 
 type EventMint struct {
@@ -23,8 +24,8 @@ type EventMint struct {
 	Amount         uint64 `json:"amount"`
 }
 
-func (e *EventMint) Type() uint8 {
-	return 1
+func (e *EventMint) Type() dbutils.EventType {
+	return dbutils.EventTypeMint
 }
 
 type EventBurn struct {
@@ -33,8 +34,8 @@ type EventBurn struct {
 	Amount         uint64 `json:"amount"`
 }
 
-func (e *EventBurn) Type() uint8 {
-	return 2
+func (e *EventBurn) Type() dbutils.EventType {
+	return dbutils.EventTypeBurn
 }
 
 type EventCloseAccount struct {
@@ -43,8 +44,8 @@ type EventCloseAccount struct {
 	To             string `json:"to"`
 }
 
-func (e *EventCloseAccount) Type() uint8 {
-	return 3
+func (e *EventCloseAccount) Type() dbutils.EventType {
+	return dbutils.EventTypeCloseAccount
 }
 
 type SwapToken struct {
@@ -60,8 +61,8 @@ type EventSwap struct {
 	To []*SwapToken `json:"to"`
 }
 
-func (e *EventSwap) Type() uint8 {
-	return 4
+func (e *EventSwap) Type() dbutils.EventType {
+	return dbutils.EventTypeSwap
 }
 
 func (e *EventSwap) String() string {

@@ -129,9 +129,10 @@ func (parser *EventsParser) parseTokenIxEvents(ix ParsableIx) (EventData, error)
 		from := accounts[0]
 		to := accounts[1]
 
-		if !parser.isRelated(from, to) {
+		if !parser.associatedAccounts.Contains(from) || !parser.associatedAccounts.Contains(to) {
 			return nil, nil
 		}
+
 		if len(data) < 8 {
 			return nil, errDataTooSmall
 		}
@@ -153,9 +154,10 @@ func (parser *EventsParser) parseTokenIxEvents(ix ParsableIx) (EventData, error)
 		from := accounts[0]
 		to := accounts[2]
 
-		if !parser.isRelated(from, to) {
+		if !parser.associatedAccounts.Contains(from) || !parser.associatedAccounts.Contains(to) {
 			return nil, nil
 		}
+
 		if len(data) < 8 {
 			return nil, errDataTooSmall
 		}
@@ -176,9 +178,11 @@ func (parser *EventsParser) parseTokenIxEvents(ix ParsableIx) (EventData, error)
 			return nil, errAccountsTooSmall
 		}
 		to := accounts[1]
-		if !parser.isRelated(to) {
+
+		if !parser.associatedAccounts.Contains(to) {
 			return nil, nil
 		}
+
 		if len(data) < 8 {
 			return nil, errDataTooSmall
 		}
@@ -197,7 +201,7 @@ func (parser *EventsParser) parseTokenIxEvents(ix ParsableIx) (EventData, error)
 			return nil, errAccountsTooSmall
 		}
 		from := accounts[0]
-		if !parser.isRelated(from) {
+		if !parser.associatedAccounts.Contains(from) {
 			return nil, nil
 		}
 		if len(data) < 8 {
@@ -218,7 +222,7 @@ func (parser *EventsParser) parseTokenIxEvents(ix ParsableIx) (EventData, error)
 		from := accounts[0]
 		to := accounts[1]
 
-		if !parser.isRelated(from, to) {
+		if !parser.associatedAccounts.Contains(from) && parser.walletAddress != to {
 			return nil, nil
 		}
 

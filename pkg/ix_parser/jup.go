@@ -7,7 +7,10 @@ import (
 	"slices"
 )
 
-const jupiterV6ProgramAddress = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+const (
+	jupV6ProgramAddress = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+	jupV4PogramAddress  = "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB"
+)
 
 var (
 	ixJupV6Route, _               = hex.DecodeString("e517cb977ae3ad2a")
@@ -108,11 +111,47 @@ func (parser *EventsParser) parseJupV6Ix(ix ParsableIx, signature string) (Event
 		}
 
 		if swapEvent := parseJupIxIntoSwapEvent(parser, ix.InnerIxs(), signature); swapEvent != nil {
-			swapEvent.ProgramAddress = jupiterV6ProgramAddress
+			swapEvent.ProgramAddress = jupV6ProgramAddress
 			return swapEvent, nil
 		}
 	} else if slices.Equal(disc, ixJupV6Route) {
-		slog.Warn("unhandled ix: ixJupV6Route", "signature", signature)
+		accounts := ix.AccountsAddresses()
+		authority := accounts[1]
+
+		if authority != parser.walletAddress {
+			return nil, nil
+		}
+
+		if swapEvent := parseJupIxIntoSwapEvent(parser, ix.InnerIxs(), signature); swapEvent != nil {
+			swapEvent.ProgramAddress = jupV6ProgramAddress
+			return swapEvent, nil
+		}
+	} else {
+		slog.Warn("unhandled ix: unknown", "signature", signature)
+	}
+
+	return nil, nil
+}
+
+func (parser *EventsParser) parseJupV4Ix(ix ParsableIx, signature string) (EventData, error) {
+	data := ix.Data()
+	if len(data) < 8 {
+		return nil, errDataTooSmall
+	}
+	disc := data[:8]
+
+	if slices.Equal(disc, ixJupV6Route) {
+		accounts := ix.AccountsAddresses()
+		authority := accounts[1]
+
+		if authority != parser.walletAddress {
+			return nil, nil
+		}
+
+		if swapEvent := parseJupIxIntoSwapEvent(parser, ix.InnerIxs(), signature); swapEvent != nil {
+			swapEvent.ProgramAddress = jupV4PogramAddress
+			return swapEvent, nil
+		}
 	} else {
 		slog.Warn("unhandled ix: unknown", "signature", signature)
 	}

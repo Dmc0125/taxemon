@@ -1,14 +1,11 @@
+CREATE TYPE event_type AS ENUM('transfer', 'mint', 'burn', 'close_account', 'mint_cnft', 'swap');
+
 CREATE TABLE event (
     id SERIAL PRIMARY KEY,
     transaction_id INTEGER NOT NULL,
     ix_idx INTEGER NOT NULL,
     idx SMALLINT NOT NULL,
-    --
-    -- 0 -> transfer
-    -- 1 -> mint
-    -- 2 -> burn
-    -- 3 -> close account
-    type SMALLINT NOT NULL,
+    type event_type NOT NULL,
     -- event data stored as json string bytes
     data JSONB NOT NULL,
     --

@@ -52,8 +52,7 @@ func printTxs(txs []*deserializedTransaction) {
 	all := make(map[string]printableIx)
 	programs := make(map[string]bool)
 	for _, tx := range txs {
-		dtx := walletsync.DeserializeSavedTransaction(tx.serialized.SelectTransactionsRow)
-		ixToString(dtx, all, programs)
+		ixToString(tx.deserialized, all, programs)
 	}
 
 	out := make(map[string]*strings.Builder)
@@ -149,20 +148,43 @@ func fetchTransactionBySignature(db *sqlx.DB, signature string) []*selectUnknown
 type knownInstruction struct {
 	ProgramAddress string `db:"program_address"`
 	Discriminator  string
-	DiscLen        int16 `db:"disc_len"`
+	DiscLen        int8 `db:"disc_len"`
 }
 
-func fetchKnownInstructions(db *sqlx.DB) []*knownInstruction {
-	q := `
-		select
-			program_address, discriminator, disc_len
-		from
-			known_instruction
-	`
-	result := make([]*knownInstruction, 0)
-	err := db.Select(&result, q)
-	assert.NoErr(err, "unable to fetch known instructions")
-	return result
+var knownInstructions = []*knownInstruction{
+	{
+		ProgramAddress: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+		Discriminator:  "c1209b3341d69c81",
+		DiscLen:        16,
+	},
+
+	{
+		ProgramAddress: "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu",
+		Discriminator:  "856e4aaf709ff59f",
+		DiscLen:        16,
+	},
+	{
+		ProgramAddress: "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu",
+		Discriminator:  "fc681286a44e128c",
+		DiscLen:        16,
+	},
+	{
+		ProgramAddress: "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu",
+		Discriminator:  "f02f99440dbee12a",
+		DiscLen:        16,
+	},
+	{
+		ProgramAddress: "ComputeBudget111111111111111111111111111111",
+	},
+	{
+		ProgramAddress: "11111111111111111111111111111111",
+	},
+	{
+		ProgramAddress: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+	},
+	{
+		ProgramAddress: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+	},
 }
 
 type deserializedTransaction struct {
@@ -170,10 +192,13 @@ type deserializedTransaction struct {
 	serialized   *selectUnknownTransactionsRow
 }
 
-func isKnown(programAddress string, data []byte, knownInstructions []*knownInstruction) bool {
+func isKnown(programAddress string, data []byte) bool {
 	for _, ki := range knownInstructions {
 		if programAddress != ki.ProgramAddress {
 			continue
+		}
+		if ki.DiscLen == 0 {
+			return true
 		}
 		if len(data) < int(ki.DiscLen) {
 			continue
@@ -208,7 +233,6 @@ func removeElement[T any](s []T, i int) []T {
 
 func removeKnownInstructions(
 	txs []*deserializedTransaction,
-	knownInstructions []*knownInstruction,
 ) []*deserializedTransaction {
 	unknownTxs := make([]*deserializedTransaction, 0)
 	for i, tx := range txs {
@@ -216,14 +240,12 @@ func removeKnownInstructions(
 
 		ixs := txs[i].deserialized.Instructions
 		for _, ix := range tx.deserialized.GetInstructions() {
-			if !isKnown(ix.ProgramAddress(), ix.Data(), knownInstructions) {
+			if !isKnown(ix.ProgramAddress(), ix.Data()) {
 				unknownIxs = append(unknownIxs, ix.(*walletsync.SavedInstruction))
 			}
 		}
 
-		if len(ixs) == 0 {
-			txs = removeElement(txs, i)
-		} else {
+		if len(ixs) > 0 {
 			tx.deserialized.Instructions = unknownIxs
 			unknownTxs = append(unknownTxs, txs[i])
 		}
@@ -257,11 +279,7 @@ func main() {
 
 	var txs []*deserializedTransaction
 	if signature == "" {
-		known := fetchKnownInstructions(db)
-		txs = removeKnownInstructions(
-			deserializeTransactions(fetchUnknownTransactions(db)),
-			known,
-		)
+		txs = removeKnownInstructions(deserializeTransactions(fetchUnknownTransactions(db)))
 	} else {
 		txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
 	}
@@ -303,13 +321,11 @@ func main() {
 				eventSerialized, err := json.Marshal(event.Data)
 				assert.NoErr(err, "unable to serialize event", "event data", event)
 
-				fmt.Println(string(eventSerialized))
-
 				insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
 					TransactionId: tx.serialized.Id,
 					IxIdx:         event.IxIdx,
 					Idx:           event.Idx,
-					Type:          int16(event.Data.Type()),
+					Type:          event.Data.Type(),
 					Data:          string(eventSerialized),
 				})
 			}
