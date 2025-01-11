@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"taxemon/pkg/assert"
 	dbutils "taxemon/pkg/db_utils"
-	ixparser "taxemon/pkg/ix_parser"
 	"taxemon/pkg/logger"
 	walletsync "taxemon/pkg/wallet_sync"
 
@@ -24,10 +24,10 @@ type printableIx struct {
 }
 
 func ixToString(tx *walletsync.SavedTransaction, all map[string]printableIx, programs map[string]bool) {
-	signature := tx.Signature()
+	signature := tx.Signature
 
-	for _, ix := range tx.GetInstructions() {
-		data := ix.Data()
+	for _, ix := range tx.Instructions {
+		data := ix.Data
 		l := 8
 		if len(data) < 8 {
 			l = len(data)
@@ -35,15 +35,14 @@ func ixToString(tx *walletsync.SavedTransaction, all map[string]printableIx, pro
 		ixDisc := data[:l]
 		discHex := hex.EncodeToString(ixDisc)
 
-		programAddress := ix.ProgramAddress()
+		programAddress := ix.ProgramAddress
 
 		programs[programAddress] = true
 
 		key := fmt.Sprintf("%s%s%s", signature, programAddress, discHex)
-		idx := ix.(*walletsync.SavedInstruction).Idx
 		all[key] = printableIx{
 			signature: signature,
-			line:      fmt.Sprintf("Program: %s idx: %d", programAddress, idx),
+			line:      fmt.Sprintf("Program: %s idx: %d", programAddress, ix.Idx),
 		}
 	}
 }
@@ -147,49 +146,37 @@ func fetchTransactionBySignature(db *sqlx.DB, signature string) []*selectUnknown
 
 type knownInstruction struct {
 	ProgramAddress string `db:"program_address"`
-	Discriminator  string
-	DiscLen        int8 `db:"disc_len"`
+	Discriminator  [][]byte
 }
 
 var knownInstructions = []*knownInstruction{
 	{
-		ProgramAddress: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-		Discriminator:  "c1209b3341d69c81",
-		DiscLen:        16,
-	},
-
-	{
-		ProgramAddress: "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu",
-		Discriminator:  "856e4aaf709ff59f",
-		DiscLen:        16,
+		ProgramAddress: walletsync.JupV6ProgramAddress,
+		Discriminator:  [][]byte{walletsync.IxJupV6SharedAccountsRoute},
 	},
 	{
-		ProgramAddress: "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu",
-		Discriminator:  "fc681286a44e128c",
-		DiscLen:        16,
+		ProgramAddress: walletsync.JupLimitProgramAddress,
+		Discriminator:  [][]byte{walletsync.IxJupLimitPreFlashFillOrder},
 	},
 	{
-		ProgramAddress: "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu",
-		Discriminator:  "f02f99440dbee12a",
-		DiscLen:        16,
+		ProgramAddress: walletsync.ComputeBudgetProgramAddress,
 	},
 	{
-		ProgramAddress: "ComputeBudget111111111111111111111111111111",
+		ProgramAddress: walletsync.SystemProgramAddress,
 	},
 	{
-		ProgramAddress: "11111111111111111111111111111111",
+		ProgramAddress: walletsync.TokenProgramAddress,
 	},
 	{
-		ProgramAddress: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+		ProgramAddress: walletsync.AssociatedTokenProgramAddress,
 	},
 	{
-		ProgramAddress: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+		ProgramAddress: walletsync.BubblegumProgramAddress,
+		Discriminator: [][]byte{
+			walletsync.IxBubblegumMintV1,
+			walletsync.IxBubblegumMintToCollectionV1,
+		},
 	},
-}
-
-type deserializedTransaction struct {
-	deserialized *walletsync.SavedTransaction
-	serialized   *selectUnknownTransactionsRow
 }
 
 func isKnown(programAddress string, data []byte) bool {
@@ -197,38 +184,35 @@ func isKnown(programAddress string, data []byte) bool {
 		if programAddress != ki.ProgramAddress {
 			continue
 		}
-		if ki.DiscLen == 0 {
+		if len(ki.Discriminator) == 0 {
 			return true
 		}
-		if len(data) < int(ki.DiscLen) {
-			continue
-		}
-		encoded := hex.EncodeToString(data)
-		disc := encoded[:ki.DiscLen]
-
-		if disc == ki.Discriminator {
-			return true
+		for _, disc := range ki.Discriminator {
+			if len(data) < len(disc) {
+				continue
+			}
+			if slices.Equal(data[:len(disc)], disc) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+type deserializedTransaction struct {
+	deserialized *walletsync.SavedTransaction
+	serialized   *selectUnknownTransactionsRow
 }
 
 func deserializeTransactions(serialized []*selectUnknownTransactionsRow) []*deserializedTransaction {
 	deserialized := make([]*deserializedTransaction, len(serialized))
 	for i, tx := range serialized {
 		deserialized[i] = &deserializedTransaction{
-			deserialized: walletsync.DeserializeSavedTransaction(tx.SelectTransactionsRow),
+			deserialized: walletsync.NewParsableTxFromDb(tx.SelectTransactionsRow),
 			serialized:   tx,
 		}
 	}
 	return deserialized
-}
-
-func removeElement[T any](s []T, i int) []T {
-	if i == len(s)-1 {
-		return s[:i]
-	}
-	return append(s[:i], s[i+1:]...)
 }
 
 func removeKnownInstructions(
@@ -239,9 +223,9 @@ func removeKnownInstructions(
 		unknownIxs := make([]*walletsync.SavedInstruction, 0)
 
 		ixs := txs[i].deserialized.Instructions
-		for _, ix := range tx.deserialized.GetInstructions() {
-			if !isKnown(ix.ProgramAddress(), ix.Data()) {
-				unknownIxs = append(unknownIxs, ix.(*walletsync.SavedInstruction))
+		for _, ix := range tx.deserialized.Instructions {
+			if !isKnown(ix.ProgramAddress, ix.Data) {
+				unknownIxs = append(unknownIxs, ix)
 			}
 		}
 
@@ -284,6 +268,8 @@ func main() {
 		txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
 	}
 
+	fmt.Printf("TXS %d\n", len(txs))
+
 	if len(txs) == 0 {
 		slog.Info("transactions empty")
 		return
@@ -313,8 +299,7 @@ func main() {
 
 		for _, tx := range txs {
 			dtx := tx.deserialized
-			parser := ixparser.NewEventsParser(tx.serialized.Address, associatedAccounts)
-			events, err := parser.ParseTx(dtx)
+			events, err := walletsync.ParseTx(dtx, tx.serialized.Address, associatedAccounts)
 			assert.NoErr(err, "unable to parse tx")
 
 			for _, event := range events {
