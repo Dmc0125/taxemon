@@ -1,4 +1,12 @@
-CREATE TYPE event_type AS ENUM('transfer', 'mint', 'burn', 'close_account', 'mint_cnft', 'swap');
+CREATE TYPE event_type AS ENUM(
+    'transfer',
+    'mint',
+    'burn',
+    'close_account',
+    'mint_cnft',
+    'swap',
+    'unstake_liquid'
+);
 
 CREATE TABLE event (
     id SERIAL PRIMARY KEY,

@@ -14,12 +14,14 @@ const (
 	ComputeBudgetProgramAddress        = "ComputeBudget111111111111111111111111111111"
 	SystemProgramAddress               = "11111111111111111111111111111111"
 	TokenProgramAddress                = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+	Token2022ProgramAddress            = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 	AssociatedTokenProgramAddress      = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 	JupV6ProgramAddress                = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 	JupV4ProgramAddress                = "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB"
 	JupLimitProgramAddress             = "jupoNjAxXgZ4rjzxzPMP4oxduvQsQtZzyknqvzYNrNu"
 	JupMerkleDistributorProgramAddress = "meRjbQXFNf5En86FXT2YPz1dQzLj4Yb3xK8u1MVgqpb"
 	BubblegumProgramAddress            = "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY"
+	AtlasStakeProgramAddress           = "63LGG86NVj87f3mkbWoqQWEd4RLNRp6a54E1qMbK3Ls4"
 	// TODO
 	JupLimit2ProgramAddress = "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"
 )
@@ -726,7 +728,10 @@ func parseJupLimitIx(ctx *parseIxContext) ([]EventData, error) {
 	}
 }
 
-var ixMerkleDistributorClaim, _ = hex.DecodeString("4eb1627bd215bb53")
+var (
+	ixMerkleDistributorClaim, _  = hex.DecodeString("4eb1627bd215bb53")
+	IxMerkleCloseClaimAccount, _ = hex.DecodeString("a3d6bfa5f5bc11b9")
+)
 
 // ctx needs:
 //   - signature
@@ -738,8 +743,9 @@ func parseMerkleDistributorIx(ctx *parseIxContext) ([]EventData, error) {
 	if len(ix.Data) < 8 {
 		return nil, ctx.errMissingDiscriminator()
 	}
+	disc := ix.Data[:8]
 
-	if slices.Equal(ix.Data[:8], ixMerkleDistributorClaim) {
+	if slices.Equal(disc, ixMerkleDistributorClaim) {
 		claimaint := ix.Accounts[4]
 
 		if claimaint == ctx.walletAddress {
@@ -775,6 +781,16 @@ func parseMerkleDistributorIx(ctx *parseIxContext) ([]EventData, error) {
 			}
 
 			return []EventData{createAccountEvent, transferEvent}, nil
+		}
+	} else if slices.Equal(disc, IxMerkleCloseClaimAccount) {
+		claimant := ix.Accounts[1]
+		if claimant == ctx.walletAddress {
+			event := &EventCloseAccount{
+				ProgramAddress: JupMerkleDistributorProgramAddress,
+				From:           ix.Accounts[0],
+				To:             claimant,
+			}
+			return []EventData{event}, nil
 		}
 	}
 
@@ -864,6 +880,92 @@ func parseBubblegumIx(ctx *parseIxContext) (EventData, error) {
 	return nil, nil
 }
 
+func parseToken2022Ix(ctx *parseIxContext) (EventData, error) {
+	event, err := parseTokenIx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if event != nil {
+		switch e := event.(type) {
+		case *EventBurn:
+			e.ProgramAddress = Token2022ProgramAddress
+		case *EventMint:
+			e.ProgramAddress = Token2022ProgramAddress
+		case *EventTransfer:
+			e.ProgramAddress = Token2022ProgramAddress
+		case *EventCloseAccount:
+			e.ProgramAddress = Token2022ProgramAddress
+		}
+		return event, nil
+	}
+	// todo
+	// handle token 2022 aditional ixs
+	return nil, nil
+}
+
+type EventUnstakeLiquid struct {
+	ProgramAddress string `json:"program_address"`
+	// unstaked liquid token
+	From []*SwapToken `json:"from"`
+	// received base token
+	To []*SwapToken `json:"to"`
+}
+
+var _ EventData = (*EventUnstakeLiquid)(nil)
+
+func (_ *EventUnstakeLiquid) Type() dbutils.EventType {
+	return dbutils.EventTypeUnstakeLiquid
+}
+
+var ixAtlasUnstake, _ = hex.DecodeString("5a5f6b2acd7c32e1")
+
+func parseAtlasStakeIx(ctx *parseIxContext) (EventData, error) {
+	ix := ctx.ix
+	if len(ix.Data) < 8 {
+		return nil, ctx.errMissingDiscriminator()
+	}
+	disc := ix.Data[:8]
+
+	if slices.Equal(disc, ixAtlasUnstake) {
+		burnIx := ix.innerInstructions[0]
+		burnEvent, err := parseTokenIx(&parseIxContext{
+			signature:          ctx.signature,
+			associatedAccounts: ctx.associatedAccounts,
+			ix: &SavedInstruction{
+				SavedInstructionBase: burnIx,
+				Idx:                  ix.Idx,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		transferIx := ctx.ix.innerInstructions[1]
+		transferEvent, err := parseTokenIx(&parseIxContext{
+			signature:          ctx.signature,
+			associatedAccounts: ctx.associatedAccounts,
+			ix: &SavedInstruction{
+				SavedInstructionBase: transferIx,
+				Idx:                  ix.Idx,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		be := burnEvent.(*EventBurn)
+		te := transferEvent.(*EventTransfer)
+		event := &EventUnstakeLiquid{
+			ProgramAddress: AtlasStakeProgramAddress,
+			From:           []*SwapToken{{Amount: be.Amount, Account: be.From}},
+			To:             []*SwapToken{{Amount: te.Amount, Account: te.To}},
+		}
+		return event, nil
+	}
+
+	return nil, nil
+}
+
 type parseIxHandler struct {
 	programAddress          string
 	parse                   func(*parseIxContext) (EventData, error)
@@ -880,6 +982,8 @@ var ixParsers = []parseIxHandler{
 	{programAddress: JupLimitProgramAddress, parseMulti: parseJupLimitIx, parseAssociatedAccounts: parseJupLimitIxAssociatedAccounts},
 	{programAddress: BubblegumProgramAddress, parse: parseBubblegumIx},
 	{programAddress: JupMerkleDistributorProgramAddress, parseMulti: parseMerkleDistributorIx},
+	{programAddress: Token2022ProgramAddress, parse: parseToken2022Ix, parseAssociatedAccounts: parseTokenIxAssociatedAccounts},
+	{programAddress: AtlasStakeProgramAddress, parse: parseAtlasStakeIx},
 }
 
 type ParsedEvent struct {

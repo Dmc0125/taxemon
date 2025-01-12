@@ -51,7 +51,7 @@ func printTxs(txs []*deserializedTransaction) {
 	all := make(map[string]printableIx)
 	programs := make(map[string]bool)
 	for _, tx := range txs {
-		ixToString(tx.deserialized, all, programs)
+		ixToString(tx.parsable, all, programs)
 	}
 
 	out := make(map[string]*strings.Builder)
@@ -104,6 +104,8 @@ func fetchUnknownTransactions(db *sqlx.DB) []*selectUnknownTransactionsRow {
 		        wallet on wallet.id = transaction_to_wallet.wallet_id
 		    where
 		        t.err = false
+			order by
+				t.slot asc, t.block_index asc
 		)
 		select
 			id, signature, accounts, logs, instructions, address, wallet_id
@@ -125,7 +127,7 @@ func fetchTransactionBySignature(db *sqlx.DB, signature string) []*selectUnknown
 		    t.signature,
 		    t.accounts,
 		    t.logs,
-		    get_instructions(t.id, true)::jsonb as instructions,
+		    get_instructions(t.id)::jsonb as instructions,
 		    wallet.address,
 		    wallet.id as wallet_id
 		from
@@ -136,7 +138,7 @@ func fetchTransactionBySignature(db *sqlx.DB, signature string) []*selectUnknown
 		    wallet on wallet.id = transaction_to_wallet.wallet_id
 		where
 		    t.err = false
-			and t.signature = string
+			and t.signature = $1
 	`
 	result := new(selectUnknownTransactionsRow)
 	err := db.Get(result, q, signature)
@@ -177,6 +179,10 @@ var knownInstructions = []*knownInstruction{
 			walletsync.IxBubblegumMintToCollectionV1,
 		},
 	},
+	{
+		ProgramAddress: walletsync.JupMerkleDistributorProgramAddress,
+		Discriminator:  [][]byte{walletsync.IxMerkleCloseClaimAccount},
+	},
 }
 
 func isKnown(programAddress string, data []byte) bool {
@@ -200,16 +206,16 @@ func isKnown(programAddress string, data []byte) bool {
 }
 
 type deserializedTransaction struct {
-	deserialized *walletsync.SavedTransaction
-	serialized   *selectUnknownTransactionsRow
+	parsable   *walletsync.SavedTransaction
+	serialized *selectUnknownTransactionsRow
 }
 
 func deserializeTransactions(serialized []*selectUnknownTransactionsRow) []*deserializedTransaction {
 	deserialized := make([]*deserializedTransaction, len(serialized))
 	for i, tx := range serialized {
 		deserialized[i] = &deserializedTransaction{
-			deserialized: walletsync.NewParsableTxFromDb(tx.SelectTransactionsRow),
-			serialized:   tx,
+			parsable:   walletsync.NewParsableTxFromDb(tx.SelectTransactionsRow),
+			serialized: tx,
 		}
 	}
 	return deserialized
@@ -222,15 +228,15 @@ func removeKnownInstructions(
 	for i, tx := range txs {
 		unknownIxs := make([]*walletsync.SavedInstruction, 0)
 
-		ixs := txs[i].deserialized.Instructions
-		for _, ix := range tx.deserialized.Instructions {
+		ixs := txs[i].parsable.Instructions
+		for _, ix := range tx.parsable.Instructions {
 			if !isKnown(ix.ProgramAddress, ix.Data) {
 				unknownIxs = append(unknownIxs, ix)
 			}
 		}
 
 		if len(ixs) > 0 {
-			tx.deserialized.Instructions = unknownIxs
+			tx.parsable.Instructions = unknownIxs
 			unknownTxs = append(unknownTxs, txs[i])
 		}
 	}
@@ -245,11 +251,14 @@ func main() {
 	err = logger.NewPrettyLogger("", int(slog.LevelDebug))
 	assert.NoErr(err, "unable to use pretty logger")
 
-	var parse bool
+	var (
+		parse     bool
+		save      bool
+		signature string
+	)
+
 	flag.BoolVar(&parse, "parse", false, "if true ixs will be parsed")
-	var save bool
 	flag.BoolVar(&save, "save", false, "if true parsed data will be saved")
-	var signature string
 	flag.StringVar(&signature, "signature", "", "signature of a transaction to be parsed")
 	flag.Parse()
 
@@ -267,8 +276,6 @@ func main() {
 	} else {
 		txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
 	}
-
-	fmt.Printf("TXS %d\n", len(txs))
 
 	if len(txs) == 0 {
 		slog.Info("transactions empty")
@@ -298,8 +305,12 @@ func main() {
 		associatedAccounts.FetchExisting(db, walletId)
 
 		for _, tx := range txs {
-			dtx := tx.deserialized
-			events, err := walletsync.ParseTx(dtx, tx.serialized.Address, associatedAccounts)
+			err := associatedAccounts.ParseTx(tx.parsable, tx.serialized.Address)
+			assert.NoErr(err, "unable to parse associated accounts")
+		}
+
+		for _, tx := range txs {
+			events, err := walletsync.ParseTx(tx.parsable, tx.serialized.Address, associatedAccounts)
 			assert.NoErr(err, "unable to parse tx")
 
 			for _, event := range events {

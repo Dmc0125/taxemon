@@ -108,7 +108,7 @@ func (associatedAccounts *AssociatedAccounts) ParseTx(
 				if err := p.parseAssociatedAccounts(ctx); err != nil {
 					return err
 				}
-				return nil
+				break
 			}
 		}
 	}
