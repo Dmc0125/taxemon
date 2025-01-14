@@ -255,82 +255,105 @@ func main() {
 		parse     bool
 		save      bool
 		signature string
+		replay    bool
 	)
 
 	flag.BoolVar(&parse, "parse", false, "if true ixs will be parsed")
 	flag.BoolVar(&save, "save", false, "if true parsed data will be saved")
 	flag.StringVar(&signature, "signature", "", "signature of a transaction to be parsed")
+	flag.BoolVar(&replay, "replay", false, "if true events will be replayed")
 	flag.Parse()
 
-	rpcUrl := os.Getenv("RPC_URL")
 	dbUrl := os.Getenv("DB_URL")
-	assert.NoEmptyStr(rpcUrl, "Missing RPC_URL")
 	assert.NoEmptyStr(dbUrl, "Missing DB_PATH")
-
 	db, err := sqlx.Connect("postgres", dbUrl)
 	assert.NoErr(err, "unable to open db", "dbPath", dbUrl)
 
-	var txs []*deserializedTransaction
-	if signature == "" {
-		txs = removeKnownInstructions(deserializeTransactions(fetchUnknownTransactions(db)))
-	} else {
-		txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
-	}
-
-	if len(txs) == 0 {
-		slog.Info("transactions empty")
-		return
-	}
-
-	if !parse {
-		printTxs(txs)
-		return
-	}
-
-	txsByWallet := make(map[int32][]*deserializedTransaction, 0)
-	for _, tx := range txs {
-		walletId := tx.serialized.WalletId
-		_, ok := txsByWallet[walletId]
-		if ok {
-			txsByWallet[walletId] = append(txsByWallet[walletId], tx)
+	if parse {
+		var txs []*deserializedTransaction
+		if signature == "" {
+			txs = removeKnownInstructions(deserializeTransactions(fetchUnknownTransactions(db)))
 		} else {
-			txsByWallet[walletId] = []*deserializedTransaction{tx}
-		}
-	}
-
-	insertableEvents := make([]*dbutils.InsertEventParams, 0)
-
-	for walletId, txs := range txsByWallet {
-		associatedAccounts := walletsync.NewAssociatedAccounts()
-		associatedAccounts.FetchExisting(db, walletId)
-
-		for _, tx := range txs {
-			err := associatedAccounts.ParseTx(tx.parsable, tx.serialized.Address)
-			assert.NoErr(err, "unable to parse associated accounts")
+			txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
 		}
 
+		if len(txs) == 0 {
+			slog.Info("transactions empty")
+			return
+		}
+
+		if !parse {
+			printTxs(txs)
+			return
+		}
+
+		txsByWallet := make(map[int32][]*deserializedTransaction, 0)
 		for _, tx := range txs {
-			events, err := walletsync.ParseTx(tx.parsable, tx.serialized.Address, associatedAccounts)
-			assert.NoErr(err, "unable to parse tx")
-
-			for _, event := range events {
-				eventSerialized, err := json.Marshal(event.Data)
-				assert.NoErr(err, "unable to serialize event", "event data", event)
-
-				insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
-					TransactionId: tx.serialized.Id,
-					IxIdx:         event.IxIdx,
-					Idx:           event.Idx,
-					Type:          event.Data.Type(),
-					Data:          string(eventSerialized),
-				})
+			walletId := tx.serialized.WalletId
+			_, ok := txsByWallet[walletId]
+			if ok {
+				txsByWallet[walletId] = append(txsByWallet[walletId], tx)
+			} else {
+				txsByWallet[walletId] = []*deserializedTransaction{tx}
 			}
 		}
-	}
 
-	if len(insertableEvents) > 0 && save {
-		err = dbutils.InsertEvents(db, insertableEvents)
-		assert.NoErr(err, "unable to insert events")
-		slog.Info("succesfully inserted ixs")
+		insertableEvents := make([]*dbutils.InsertEventParams, 0)
+
+		for walletId, txs := range txsByWallet {
+			associatedAccounts := walletsync.NewAssociatedAccounts()
+			associatedAccounts.FetchExisting(db, walletId)
+
+			for _, tx := range txs {
+				err := associatedAccounts.ParseTx(tx.parsable, tx.serialized.Address)
+				assert.NoErr(err, "unable to parse associated accounts")
+			}
+
+			for _, tx := range txs {
+				events, err := walletsync.ParseTx(tx.parsable, tx.serialized.Address, associatedAccounts)
+				assert.NoErr(err, "unable to parse tx")
+
+				for _, event := range events {
+					eventSerialized, err := json.Marshal(event.Data)
+					assert.NoErr(err, "unable to serialize event", "event data", event)
+
+					fmt.Printf("event %s\n", eventSerialized)
+
+					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
+						TransactionId: tx.serialized.Id,
+						IxIdx:         event.IxIdx,
+						Idx:           event.Idx,
+						Type:          event.Data.Type(),
+						Data:          string(eventSerialized),
+					})
+				}
+			}
+		}
+
+		if len(insertableEvents) > 0 && save {
+			err = dbutils.InsertEvents(db, insertableEvents)
+			assert.NoErr(err, "unable to insert events")
+			slog.Info("succesfully inserted ixs")
+		}
+	} else if replay {
+		offset := 0
+		replay := walletsync.NewReplay(db)
+
+		for {
+			events, err := dbutils.SelectEvents(db, offset*500)
+			assert.NoErr(err, "unable to select events")
+
+			for _, event := range events {
+				replay.ProcessEvent(event)
+			}
+
+			if len(events) < 500 {
+				break
+			}
+			offset += 1
+		}
+
+		fmt.Println()
+		fmt.Println(replay.AccountsString())
 	}
 }

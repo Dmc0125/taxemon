@@ -372,3 +372,48 @@ func UpdateSyncRequestStatus(db DBTX, walletId int32, status SyncRequestStatus) 
 	_, err := db.Exec(q, status, walletId)
 	return err
 }
+
+type SelectEventsRow struct {
+	Signature string
+	Id        int32
+	IxIdx     int32 `db:"ix_idx"`
+	Type      EventType
+	Data      string
+}
+
+// TODO: FEES
+func SelectEvents(db DBTX, offset int) ([]*SelectEventsRow, error) {
+	result := make([]*SelectEventsRow, 0)
+	q := `
+		select
+			e.id, e.type, e.data, e.ix_idx, t.signature
+		from
+			event e
+			join "transaction" t on t.id = e.transaction_id
+		order by
+			t.slot asc, t.block_index asc, e.ix_idx asc, e.idx asc
+		limit
+			500
+		offset $1
+	`
+	err := db.Select(&result, q, offset)
+	return result, err
+}
+
+type SelectWalletsRow struct {
+	Id      int32
+	Address string
+}
+
+func SelectWallets(db DBTX) ([]*SelectWalletsRow, error) {
+	result := make([]*SelectWalletsRow, 0)
+	q := `
+		select
+			address,
+			id
+		from
+			wallet
+	`
+	err := db.Select(&result, q)
+	return result, err
+}

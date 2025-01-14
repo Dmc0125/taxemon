@@ -6,7 +6,6 @@ import (
 	"taxemon/pkg/assert"
 	dbutils "taxemon/pkg/db_utils"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/mr-tron/base58"
 )
 
@@ -55,7 +54,7 @@ func (a *AssociatedAccounts) Get(address string) iAssociatedAccount {
 	return account
 }
 
-func (a *AssociatedAccounts) FetchExisting(db *sqlx.DB, walletId int32) {
+func (a *AssociatedAccounts) FetchExisting(db dbutils.DBTX, walletId int32) {
 	associatedAccounts, err := dbutils.SelectAssociatedAccounts(db, walletId)
 	assert.NoErr(err, "unable to select associated accounts")
 	for _, account := range associatedAccounts {
@@ -115,6 +114,10 @@ func (associatedAccounts *AssociatedAccounts) ParseTx(
 	return nil
 }
 
+type tTokenAccountData struct {
+	Mint string
+}
+
 type AssociatedAccountToken struct {
 	address     string
 	mint        string
@@ -124,14 +127,14 @@ type AssociatedAccountToken struct {
 var _ iAssociatedAccount = (*AssociatedAccountToken)(nil)
 
 func newAssociatedAccountToken(account *dbutils.SelectAssociatedAccountsRow) *AssociatedAccountToken {
-	data := make(map[string]string)
+	data := new(tTokenAccountData)
 	if account.Data.Valid {
 		err := json.Unmarshal([]byte(account.Data.String), &data)
 		assert.NoErr(err, "unable to unmarshal associated account token data")
 	}
 	return &AssociatedAccountToken{
 		address:     account.Address,
-		mint:        data["mint"],
+		mint:        data.Mint,
 		shouldFetch: account.ShouldFetch,
 	}
 }

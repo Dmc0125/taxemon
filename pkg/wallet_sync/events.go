@@ -51,7 +51,7 @@ func (ctx *parseIxContext) errMissingAccounts() error {
 	return fmt.Errorf("ix accounts missing: idx %d program %s signature %s", ctx.ix.Idx, ctx.ix.ProgramAddress, ctx.signature)
 }
 
-type EventTransfer struct {
+type EventNativeTransfer struct {
 	ProgramAddress string `json:"program_address"`
 	IsRent         bool   `json:"is_rent"`
 	From           string `json:"from"`
@@ -59,10 +59,10 @@ type EventTransfer struct {
 	Amount         uint64 `json:"amount"`
 }
 
-var _ EventData = (*EventTransfer)(nil)
+var _ EventData = (*EventNativeTransfer)(nil)
 
-func (e *EventTransfer) Type() dbutils.EventType {
-	return dbutils.EventTypeTransfer
+func (e *EventNativeTransfer) Type() dbutils.EventType {
+	return dbutils.EventTypeNativeTransfer
 }
 
 const (
@@ -82,7 +82,7 @@ func parseSystemIx(ctx *parseIxContext) (EventData, error) {
 	if len(ix.Data) < 1 {
 		return nil, ctx.errMissingDiscriminator()
 	}
-	data := ix.Data[1:]
+	data := ix.Data[4:]
 
 	switch ix.Data[0] {
 	case ixSystemCreateAccount:
@@ -102,11 +102,12 @@ func parseSystemIx(ctx *parseIxContext) (EventData, error) {
 		}
 		lamports := binary.LittleEndian.Uint64(data)
 
-		event := &EventTransfer{
-			IsRent: true,
-			From:   from,
-			To:     to,
-			Amount: lamports,
+		event := &EventNativeTransfer{
+			ProgramAddress: SystemProgramAddress,
+			IsRent:         true,
+			From:           from,
+			To:             to,
+			Amount:         lamports,
 		}
 		return event, nil
 	case ixSystemWithdrawNonceAccount:
@@ -128,11 +129,12 @@ func parseSystemIx(ctx *parseIxContext) (EventData, error) {
 		}
 		lamports := binary.LittleEndian.Uint64(data)
 
-		event := &EventTransfer{
-			IsRent: false,
-			From:   from,
-			To:     to,
-			Amount: lamports,
+		event := &EventNativeTransfer{
+			ProgramAddress: SystemProgramAddress,
+			IsRent:         false,
+			From:           from,
+			To:             to,
+			Amount:         lamports,
 		}
 		return event, nil
 	case ixSystemCreateWithSeed:
@@ -156,11 +158,12 @@ func parseSystemIx(ctx *parseIxContext) (EventData, error) {
 		}
 		lamports := binary.LittleEndian.Uint64(data[40+seedLen+seedPadding:])
 
-		event := &EventTransfer{
-			IsRent: true,
-			From:   from,
-			To:     to,
-			Amount: lamports,
+		event := &EventNativeTransfer{
+			ProgramAddress: SystemProgramAddress,
+			IsRent:         true,
+			From:           from,
+			To:             to,
+			Amount:         lamports,
 		}
 		return event, nil
 	case ixSystemTransferWithSeed:
@@ -179,11 +182,12 @@ func parseSystemIx(ctx *parseIxContext) (EventData, error) {
 		}
 		lamports := binary.LittleEndian.Uint64(data)
 
-		event := &EventTransfer{
-			IsRent: false,
-			From:   from,
-			To:     to,
-			Amount: lamports,
+		event := &EventNativeTransfer{
+			ProgramAddress: SystemProgramAddress,
+			IsRent:         false,
+			From:           from,
+			To:             to,
+			Amount:         lamports,
 		}
 		return event, nil
 	default:
@@ -204,6 +208,19 @@ const (
 	ixTokenInitAccount2 = 16
 	ixTokenInitAccount3 = 18
 )
+
+type EventTransfer struct {
+	ProgramAddress string `json:"program_address"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	Amount         uint64 `json:"amount"`
+}
+
+var _ EventData = (*EventTransfer)(nil)
+
+func (e *EventTransfer) Type() dbutils.EventType {
+	return dbutils.EventTypeTransfer
+}
 
 type EventMint struct {
 	ProgramAddress string `json:"program_address"`
@@ -271,7 +288,6 @@ func parseTokenIx(ctx *parseIxContext) (EventData, error) {
 		amount := binary.LittleEndian.Uint64(data)
 		event := &EventTransfer{
 			ProgramAddress: TokenProgramAddress,
-			IsRent:         false,
 			From:           from,
 			To:             to,
 			Amount:         amount,
@@ -294,7 +310,6 @@ func parseTokenIx(ctx *parseIxContext) (EventData, error) {
 		amount := binary.LittleEndian.Uint64(data)
 		event := &EventTransfer{
 			ProgramAddress: TokenProgramAddress,
-			IsRent:         false,
 			From:           from,
 			To:             to,
 			Amount:         amount,
@@ -384,10 +399,7 @@ func parseAssociatedTokenIx(ctx *parseIxContext) (EventData, error) {
 			return nil, ctx.errMissingAccounts()
 		}
 
-		from := ix.Accounts[0]
-		to := ix.Accounts[1]
-
-		if from != ctx.walletAddress {
+		if ix.Accounts[2] != ctx.walletAddress {
 			return nil, nil
 		}
 
@@ -397,10 +409,10 @@ func parseAssociatedTokenIx(ctx *parseIxContext) (EventData, error) {
 			createAccountIx := ix.innerInstructions[1]
 			lamports := binary.LittleEndian.Uint64(createAccountIx.Data[4:])
 
-			event := &EventTransfer{
-				ProgramAddress: AssociatedTokenProgramAddress,
-				From:           from,
-				To:             to,
+			event := &EventNativeTransfer{
+				ProgramAddress: SystemProgramAddress,
+				From:           ix.Accounts[0],
+				To:             ix.Accounts[1],
 				Amount:         lamports,
 				IsRent:         true,
 			}
@@ -627,11 +639,11 @@ func parseJupLimitIx(ctx *parseIxContext) ([]EventData, error) {
 
 		if len(ix.innerInstructions) == 4 {
 			iix := ix.innerInstructions[0]
-			amount := binary.LittleEndian.Uint64(iix.Data[1:])
+			amount := binary.LittleEndian.Uint64(iix.Data[4:])
 			from := iix.Accounts[0]
 			to := iix.Accounts[1]
 
-			events = append(events, &EventTransfer{
+			events = append(events, &EventNativeTransfer{
 				ProgramAddress: JupLimitProgramAddress,
 				IsRent:         true,
 				From:           from,
@@ -642,11 +654,11 @@ func parseJupLimitIx(ctx *parseIxContext) ([]EventData, error) {
 
 		if len(ix.innerInstructions) != 1 {
 			iix := ix.innerInstructions[1]
-			amount := binary.LittleEndian.Uint64(iix.Data[1:])
+			amount := binary.LittleEndian.Uint64(iix.Data[4:])
 			from := iix.Accounts[0]
 			to := iix.Accounts[1]
 
-			events = append(events, &EventTransfer{
+			events = append(events, &EventNativeTransfer{
 				ProgramAddress: JupLimitProgramAddress,
 				IsRent:         true,
 				From:           from,
@@ -656,11 +668,10 @@ func parseJupLimitIx(ctx *parseIxContext) ([]EventData, error) {
 		}
 
 		transferIix := ix.innerInstructions[len(ix.innerInstructions)-1]
-		amount := binary.LittleEndian.Uint64(transferIix.Data)
+		amount := binary.LittleEndian.Uint64(transferIix.Data[1:])
 
 		events = append(events, &EventTransfer{
 			ProgramAddress: JupLimitProgramAddress,
-			IsRent:         false,
 			From:           transferIix.Accounts[0],
 			To:             transferIix.Accounts[2],
 			Amount:         amount,
@@ -765,7 +776,7 @@ func parseMerkleDistributorIx(ctx *parseIxContext) ([]EventData, error) {
 			if err != nil {
 				return nil, err
 			}
-			createAccountEvent.(*EventTransfer).ProgramAddress = JupMerkleDistributorProgramAddress
+			createAccountEvent.(*EventNativeTransfer).ProgramAddress = JupMerkleDistributorProgramAddress
 
 			transferIx := ix.innerInstructions[1]
 			transferEvent, err := parseTokenIx(&parseIxContext{

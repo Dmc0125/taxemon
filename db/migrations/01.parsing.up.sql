@@ -1,4 +1,5 @@
 CREATE TYPE event_type AS ENUM(
+    'native_transfer',
     'transfer',
     'mint',
     'burn',
