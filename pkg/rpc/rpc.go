@@ -107,7 +107,7 @@ func (c *Client) execute(method string, params any, out interface{}) error {
 
 type SignatureResult struct {
 	Err                map[string]interface{} `json:"err,omitempty"`
-	Memo               bool                   `json:"memo,omitempty"`
+	Memo               string                 `json:"memo,omitempty"`
 	Signature          string
 	Slot               uint64
 	BlockTime          int64  `json:"blockTime,omitempty"`

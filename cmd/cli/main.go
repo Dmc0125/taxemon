@@ -1,8 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -12,236 +14,354 @@ import (
 	"taxemon/pkg/assert"
 	dbutils "taxemon/pkg/db_utils"
 	"taxemon/pkg/logger"
+	"taxemon/pkg/rpc"
 	walletsync "taxemon/pkg/wallet_sync"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/joho/godotenv"
 )
 
-type printableIx struct {
+type knownInstructionMeta struct {
+	allKnown bool
+	discLen  int
+	discs    []string
+}
+
+var knownInstructions = func() map[string]*knownInstructionMeta {
+	m := make(map[string]*knownInstructionMeta)
+	m[walletsync.ComputeBudgetProgramAddress] = &knownInstructionMeta{allKnown: true}
+	m[walletsync.SystemProgramAddress] = &knownInstructionMeta{allKnown: true}
+	m[walletsync.TokenProgramAddress] = &knownInstructionMeta{allKnown: true}
+	m[walletsync.AssociatedTokenProgramAddress] = &knownInstructionMeta{discLen: -1, discs: []string{"", "01", "00"}}
+	m[walletsync.JupLimitProgramAddress] = &knownInstructionMeta{
+		discLen: -1,
+		discs:   []string{hex.EncodeToString(walletsync.IxJupLimitPreFlashFillOrder)},
+	}
+	m[walletsync.JupV6ProgramAddress] = &knownInstructionMeta{
+		discLen: -1,
+		discs:   []string{hex.EncodeToString(walletsync.IxJupV6SharedAccountsRoute)},
+	}
+	m[walletsync.BubblegumProgramAddress] = &knownInstructionMeta{
+		discLen: -1,
+		discs: []string{
+			hex.EncodeToString(walletsync.IxBubblegumMintToCollectionV1),
+			hex.EncodeToString(walletsync.IxBubblegumMintV1),
+		},
+	}
+	m[walletsync.JupMerkleDistributorProgramAddress] = &knownInstructionMeta{
+		discLen: -1,
+		discs:   []string{hex.EncodeToString(walletsync.IxMerkleCloseClaimAccount), hex.EncodeToString(walletsync.IxMerkleDistributorClaim)},
+	}
+	return m
+}()
+
+const fetchTransactionQuery = `
+	select
+		t.err
+		t.id,
+		t.signature,
+		t.accounts,
+		t.logs,
+		get_instructions(t.id)::jsonb as instructions,
+		wallet.address,
+		wallet.id as wallet_id
+	from
+		"transaction" t
+		join
+			transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
+		join
+			wallet on wallet.id = transaction_to_wallet.wallet_id
+`
+
+type unknownInstruction struct {
 	signature string
-	line      string
+	ixIdx     int32
 }
 
-func ixToString(tx *walletsync.SavedTransaction, all map[string]printableIx, programs map[string]bool) {
-	signature := tx.Signature
+func printUnknownInstructions(db dbutils.DBTX) {
+	q := `
+		with tx_instructions as (
+			select
+				t.err,
+				t.id,
+				t.signature,
+				t.accounts,
+				t.logs,
+				get_instructions(t.id, true)::jsonb as instructions
+			from
+				"transaction" t
+		)
+		select
+			signature, accounts, logs, instructions
+		from
+			tx_instructions
+		where
+			jsonb_array_length(instructions) > 0
+			and err = false
+	`
+	result := make([]*dbutils.SelectTransactionsRow, 0)
+	err := db.Select(&result, q)
+	assert.NoErr(err, "unable to query unknown transactions")
 
-	for _, ix := range tx.Instructions {
-		data := ix.Data
-		l := 8
-		if len(data) < 8 {
-			l = len(data)
-		}
-		ixDisc := data[:l]
-		discHex := hex.EncodeToString(ixDisc)
+	unknown := make(map[string]map[string]*unknownInstruction)
 
-		programAddress := ix.ProgramAddress
+	for _, tx := range result {
+		parsableIx := walletsync.NewParsableTxFromDb(tx)
 
-		programs[programAddress] = true
+	ixs:
+		for _, ix := range parsableIx.Instructions {
 
-		key := fmt.Sprintf("%s%s%s", signature, programAddress, discHex)
-		all[key] = printableIx{
-			signature: signature,
-			line:      fmt.Sprintf("Program: %s idx: %d", programAddress, ix.Idx),
+			data := hex.EncodeToString(ix.Data)
+			var disc string
+
+			k, ok := knownInstructions[ix.ProgramAddress]
+			if ok {
+				if k.allKnown {
+					continue ixs
+				}
+				for _, d := range k.discs {
+					if strings.HasPrefix(data, d) {
+						continue ixs
+					}
+				}
+				if k.discLen != -1 {
+					if len(data) < k.discLen {
+						disc = data
+					} else {
+						disc = data[:k.discLen]
+					}
+				}
+			}
+
+			if disc == "" {
+				discLen := 8
+				if len(ix.Data) < 8 {
+					discLen = len(ix.Data)
+				}
+				disc = hex.EncodeToString(ix.Data[:discLen])
+			}
+
+			unknownIxs, ok := unknown[ix.ProgramAddress]
+			if !ok {
+				unknown[ix.ProgramAddress] = make(map[string]*unknownInstruction)
+				unknownIxs = unknown[ix.ProgramAddress]
+			}
+			if _, ok = unknownIxs[disc]; !ok {
+				unknownIxs[disc] = &unknownInstruction{
+					signature: tx.Signature,
+					ixIdx:     ix.Idx,
+				}
+			}
 		}
 	}
+
+	out := strings.Builder{}
+	for programAddress, ixs := range unknown {
+		out.WriteString(programAddress)
+		for disc, ix := range ixs {
+			out.WriteString(fmt.Sprintf("\n\tSignature: %s disc: %s idx: %d", ix.signature, disc, ix.ixIdx))
+		}
+		out.WriteString("\n")
+	}
+
+	fmt.Println(out.String())
 }
 
-func printTxs(txs []*deserializedTransaction) {
-	all := make(map[string]printableIx)
-	programs := make(map[string]bool)
-	for _, tx := range txs {
-		ixToString(tx.parsable, all, programs)
-	}
-
-	out := make(map[string]*strings.Builder)
-	for _, ix := range all {
-		b, ok := out[ix.signature]
-		if !ok {
-			b = &strings.Builder{}
-			b.WriteString("\t")
-			b.WriteString(ix.line)
-			out[ix.signature] = b
-		} else {
-			b.WriteString("\n\t")
-			b.WriteString(ix.line)
-		}
-	}
-
-	for signature, rest := range out {
-		fmt.Println(signature)
-		fmt.Println(rest)
-	}
-
-	fmt.Println("\nPrograms")
-	for address := range programs {
-		fmt.Printf("\t%s\n", address)
-	}
-}
-
-type selectUnknownTransactionsRow struct {
+type getTransactionsRow struct {
 	*dbutils.SelectTransactionsRow
 	Address  string
 	WalletId int32 `db:"wallet_id"`
 }
 
-func fetchUnknownTransactions(db *sqlx.DB) []*selectUnknownTransactionsRow {
-	q := `
-		with tx_instructions as (
-		    select
-		        t.id,
-		        t.signature,
-		        t.accounts,
-		        t.logs,
-		        get_instructions(t.id, true)::jsonb as instructions,
-		        wallet.address,
-		        wallet.id as wallet_id
-		    from
-		        "transaction" t
-		    join
-		        transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
-		    join
-		        wallet on wallet.id = transaction_to_wallet.wallet_id
-		    where
-		        t.err = false
-			order by
-				t.slot asc, t.block_index asc
-		)
+type tParsableTx struct {
+	*walletsync.SavedTransaction
+	Address  string
+	WalletId int32
+}
+
+type getTransactionsConfig struct {
+	signature      string
+	programAddress string
+	discriminator  string
+	walletAddress  string
+	ignorePrograms []string
+}
+
+func getTransactions(db dbutils.DBTX, config *getTransactionsConfig) map[int32][]*tParsableTx {
+	var txs []*getTransactionsRow
+
+	q := strings.Builder{}
+	q.WriteString(`
 		select
-			id, signature, accounts, logs, instructions, address, wallet_id
+			t.err,
+			t.id,
+			t.signature,
+			t.accounts,
+			t.logs,
+			get_instructions(t.id)::jsonb as instructions,
+			wallet.address,
+			wallet.id as wallet_id
 		from
-			tx_instructions
-		where
-			jsonb_array_length(instructions) > 0
-	`
-	result := make([]*selectUnknownTransactionsRow, 0)
-	err := db.Select(&result, q)
-	assert.NoErr(err, "unable to fetch transactions")
-	return result
-}
+			"transaction" t
+			join
+				transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
+			join
+				wallet on wallet.id = transaction_to_wallet.wallet_id
+	`)
 
-func fetchTransactionBySignature(db *sqlx.DB, signature string) []*selectUnknownTransactionsRow {
-	q := `
-		select
-		    t.id,
-		    t.signature,
-		    t.accounts,
-		    t.logs,
-		    get_instructions(t.id)::jsonb as instructions,
-		    wallet.address,
-		    wallet.id as wallet_id
-		from
-		    "transaction" t
-		join
-		    transaction_to_wallet on transaction_to_wallet.transaction_id = t.id
-		join
-		    wallet on wallet.id = transaction_to_wallet.wallet_id
-		where
-		    t.err = false
-			and t.signature = $1
-	`
-	result := new(selectUnknownTransactionsRow)
-	err := db.Get(result, q, signature)
-	assert.NoErr(err, "unable to fetch transaction")
-	return []*selectUnknownTransactionsRow{result}
-}
-
-type knownInstruction struct {
-	ProgramAddress string `db:"program_address"`
-	Discriminator  [][]byte
-}
-
-var knownInstructions = []*knownInstruction{
-	{
-		ProgramAddress: walletsync.JupV6ProgramAddress,
-		Discriminator:  [][]byte{walletsync.IxJupV6SharedAccountsRoute},
-	},
-	{
-		ProgramAddress: walletsync.JupLimitProgramAddress,
-		Discriminator:  [][]byte{walletsync.IxJupLimitPreFlashFillOrder},
-	},
-	{
-		ProgramAddress: walletsync.ComputeBudgetProgramAddress,
-	},
-	{
-		ProgramAddress: walletsync.SystemProgramAddress,
-	},
-	{
-		ProgramAddress: walletsync.TokenProgramAddress,
-	},
-	{
-		ProgramAddress: walletsync.AssociatedTokenProgramAddress,
-	},
-	{
-		ProgramAddress: walletsync.BubblegumProgramAddress,
-		Discriminator: [][]byte{
-			walletsync.IxBubblegumMintV1,
-			walletsync.IxBubblegumMintToCollectionV1,
-		},
-	},
-	{
-		ProgramAddress: walletsync.JupMerkleDistributorProgramAddress,
-		Discriminator:  [][]byte{walletsync.IxMerkleCloseClaimAccount},
-	},
-}
-
-func isKnown(programAddress string, data []byte) bool {
-	for _, ki := range knownInstructions {
-		if programAddress != ki.ProgramAddress {
-			continue
+	if config.signature == "" {
+		var err error
+		if config.walletAddress != "" {
+			q.WriteString("and wallet.address = $1 ")
+			q.WriteString("order by t.slot asc, t.block_index asc")
+			err = db.Select(&txs, q.String(), config.walletAddress)
+		} else {
+			q.WriteString("order by t.slot asc, t.block_index asc")
+			err = db.Select(&txs, q.String())
 		}
-		if len(ki.Discriminator) == 0 {
-			return true
+		assert.NoErr(err, "unable to select txs")
+	} else {
+		q.WriteString("where t.signature = $1")
+		err := db.Select(&txs, q.String(), config.signature)
+		assert.NoErr(err, "unbale to get tx")
+		if len(txs) == 0 {
+			fmt.Printf("Transaction with signature \"%s\" does not exist", config.signature)
+			os.Exit(0)
 		}
-		for _, disc := range ki.Discriminator {
-			if len(data) < len(disc) {
+	}
+
+	filteredTxsByWallet := make(map[int32][]*tParsableTx, 0)
+
+	for _, tx := range txs {
+		parsableTx := walletsync.NewParsableTxFromDb(tx.SelectTransactionsRow)
+		filteredIxs := make([]*walletsync.SavedInstruction, 0)
+
+		for _, ix := range parsableTx.Instructions {
+			if slices.Contains(config.ignorePrograms, ix.ProgramAddress) {
 				continue
 			}
-			if slices.Equal(data[:len(disc)], disc) {
-				return true
+			if config.programAddress == "" {
+				filteredIxs = append(filteredIxs, ix)
+				continue
 			}
-		}
-	}
-	return false
-}
-
-type deserializedTransaction struct {
-	parsable   *walletsync.SavedTransaction
-	serialized *selectUnknownTransactionsRow
-}
-
-func deserializeTransactions(serialized []*selectUnknownTransactionsRow) []*deserializedTransaction {
-	deserialized := make([]*deserializedTransaction, len(serialized))
-	for i, tx := range serialized {
-		deserialized[i] = &deserializedTransaction{
-			parsable:   walletsync.NewParsableTxFromDb(tx.SelectTransactionsRow),
-			serialized: tx,
-		}
-	}
-	return deserialized
-}
-
-func removeKnownInstructions(
-	txs []*deserializedTransaction,
-) []*deserializedTransaction {
-	unknownTxs := make([]*deserializedTransaction, 0)
-	for i, tx := range txs {
-		unknownIxs := make([]*walletsync.SavedInstruction, 0)
-
-		ixs := txs[i].parsable.Instructions
-		for _, ix := range tx.parsable.Instructions {
-			if !isKnown(ix.ProgramAddress, ix.Data) {
-				unknownIxs = append(unknownIxs, ix)
+			if ix.ProgramAddress != config.programAddress {
+				continue
+			}
+			if config.discriminator == "" {
+				filteredIxs = append(filteredIxs, ix)
+				continue
+			}
+			if strings.HasPrefix(hex.EncodeToString(ix.Data), config.discriminator) {
+				filteredIxs = append(filteredIxs, ix)
 			}
 		}
 
-		if len(ixs) > 0 {
-			tx.parsable.Instructions = unknownIxs
-			unknownTxs = append(unknownTxs, txs[i])
+		if len(filteredIxs) > 0 {
+			_, ok := filteredTxsByWallet[tx.WalletId]
+			if !ok {
+				txs := make([]*tParsableTx, 0)
+				filteredTxsByWallet[tx.WalletId] = txs
+			}
+			parsableTx.Instructions = filteredIxs
+			filteredTxsByWallet[tx.WalletId] = append(filteredTxsByWallet[tx.WalletId], &tParsableTx{
+				SavedTransaction: parsableTx,
+				Address:          tx.Address,
+				WalletId:         tx.WalletId,
+			})
 		}
 	}
 
-	return unknownTxs
+	return filteredTxsByWallet
+}
+
+func parseInstructions(
+	db dbutils.DBTX,
+	signature,
+	programAddress,
+	discriminator,
+	walletAddress,
+	ignorePrograms string,
+	save bool,
+) {
+	txsByWallet := getTransactions(db, &getTransactionsConfig{
+		signature:      signature,
+		programAddress: programAddress,
+		discriminator:  discriminator,
+		walletAddress:  walletAddress,
+		ignorePrograms: strings.Split(ignorePrograms, ","),
+	})
+
+	insertableEvents := make([]*dbutils.InsertEventParams, 0)
+
+	for walletId, txs := range txsByWallet {
+		associatedAccounts := walletsync.NewAssociatedAccounts()
+		associatedAccounts.FetchExisting(db, walletId)
+		for _, tx := range txs {
+			err := associatedAccounts.ParseTx(tx.SavedTransaction, tx.Address)
+			assert.NoErr(err, "unable to parse tx associated accounts", "signature", tx.Signature)
+		}
+
+		for _, tx := range txs {
+			events, err := walletsync.ParseTxIntoEvents(tx.SavedTransaction, tx.Address, associatedAccounts)
+			assert.NoErr(err, "unable to parse tx into events", "signature", tx.Signature)
+
+			for _, event := range events {
+				ser, err := json.Marshal(event.Data)
+				assert.NoErr(err, "unable to serialize event", "type", event.Data.Type())
+				serStr := string(ser)
+
+				fmt.Printf("\nSignature %s ix idx %d\n", tx.Signature, event.IxIdx)
+				fmt.Printf("Serialized event: %s\n", serStr)
+
+				if save {
+					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
+						TransactionId: tx.Id,
+						IxIdx:         event.IxIdx,
+						Idx:           event.Idx,
+						Data:          serStr,
+						Type:          event.Data.Type(),
+					})
+				}
+			}
+		}
+	}
+
+	if len(insertableEvents) > 0 {
+		err := dbutils.InsertEvents(db, insertableEvents)
+		assert.NoErr(err, "unable to insert events")
+	}
+}
+
+func fetchTransactions(db *sqlx.DB, rpcClient *rpc.Client, walletAddress, signature string) {
+	wallet := new(dbutils.SelectWalletsRow)
+	selectWalletByAddressQ := "select id, address, last_signature from wallet where address = $1 limit 1"
+	err := db.Get(wallet, selectWalletByAddressQ, walletAddress)
+	if errors.Is(err, sql.ErrNoRows) {
+		if wallet.Id == 0 {
+			insertWalletQ := "insert into wallet (address) values ($1) returning id, address, last_signature"
+			err = db.Get(wallet, insertWalletQ, walletAddress)
+			assert.NoErr(err, "unable to insert wallet")
+		}
+	}
+	assert.NoErr(err, "unable to select wallet")
+
+	if signature == "" {
+		walletsync.SyncWallet(rpcClient, db, wallet.Id, wallet.Address, wallet.LastSignature.String)
+	} else {
+		tx, err := rpcClient.GetTransaction(signature, rpc.CommitmentConfirmed)
+		assert.NoErr(err, "unable to fetch transaction")
+		insertableTx, err := walletsync.NewInsertableTransaction(tx)
+		assert.NoErr(err, "unable to create insertale tx")
+
+		parsableTx := walletsync.NewParsableTxFromInsertable(insertableTx)
+		associatedAccounts := walletsync.NewAssociatedAccounts()
+		associatedAccounts.FetchExisting(db, wallet.Id)
+
+		err = associatedAccounts.ParseTx(parsableTx, walletAddress)
+		assert.NoErr(err, "unable to parse associated accounts")
+
+	}
 }
 
 func main() {
@@ -252,108 +372,53 @@ func main() {
 	assert.NoErr(err, "unable to use pretty logger")
 
 	var (
-		parse     bool
-		save      bool
-		signature string
-		replay    bool
+		fetch, print, parseEvents, parseIxs, save               bool
+		signature, programAddress, discriminator, walletAddress string
+		ignorePrograms                                          string
 	)
 
-	flag.BoolVar(&parse, "parse", false, "if true ixs will be parsed")
-	flag.BoolVar(&save, "save", false, "if true parsed data will be saved")
-	flag.StringVar(&signature, "signature", "", "signature of a transaction to be parsed")
-	flag.BoolVar(&replay, "replay", false, "if true events will be replayed")
+	flag.BoolVar(&fetch, "fetch", false, "will fetch transactions for wallet")
+	flag.BoolVar(&print, "print", false, "will print instructions that are currently unparsed")
+	flag.BoolVar(&parseEvents, "parse-events", false, "will parse events if true")
+	flag.BoolVar(&parseIxs, "parse-ixs", false, "will parse ixs if true")
+	flag.BoolVar(&save, "save", false, "will save parse data if true")
+	flag.StringVar(&signature, "signature", "", "will only parse transaction with this siganture if provided")
+	flag.StringVar(&programAddress, "program-address", "", "will only parse instructions with this program address (only works for --parse-ixs)")
+	flag.StringVar(&discriminator, "discriminator", "", "(hex) will only parse instructions with this discriminator (only works with program address, and for --parse-ixs)")
+	flag.StringVar(&walletAddress, "wallet-address", "", "instructions only for this wallet will be parsed (only works for --parse-ixs)")
+	flag.StringVar(&ignorePrograms, "ignore-programs", "", "program addresses to ignore when parsing ixs separated by comma (only works for --parse-ixs)")
 	flag.Parse()
 
 	dbUrl := os.Getenv("DB_URL")
-	assert.NoEmptyStr(dbUrl, "Missing DB_PATH")
+	assert.NoEmptyStr(dbUrl, "Missing DB_URL")
 	db, err := sqlx.Connect("postgres", dbUrl)
 	assert.NoErr(err, "unable to open db", "dbPath", dbUrl)
 
-	if parse {
-		var txs []*deserializedTransaction
-		if signature == "" {
-			txs = removeKnownInstructions(deserializeTransactions(fetchUnknownTransactions(db)))
-		} else {
-			txs = deserializeTransactions(fetchTransactionBySignature(db, signature))
-		}
+	switch {
+	case fetch:
+		assert.NoEmptyStr(walletAddress, "wallet-address needs to be provided for fetch")
 
-		if len(txs) == 0 {
-			slog.Info("transactions empty")
-			return
-		}
+		rpcUrl := os.Getenv("RPC_URL")
+		assert.NoEmptyStr(rpcUrl, "Missing RPC_URL")
 
-		if !parse {
-			printTxs(txs)
-			return
-		}
+		slog.Info("Fetching transactions for wallet", "walletAddress", walletAddress)
 
-		txsByWallet := make(map[int32][]*deserializedTransaction, 0)
-		for _, tx := range txs {
-			walletId := tx.serialized.WalletId
-			_, ok := txsByWallet[walletId]
-			if ok {
-				txsByWallet[walletId] = append(txsByWallet[walletId], tx)
-			} else {
-				txsByWallet[walletId] = []*deserializedTransaction{tx}
-			}
-		}
-
-		insertableEvents := make([]*dbutils.InsertEventParams, 0)
-
-		for walletId, txs := range txsByWallet {
-			associatedAccounts := walletsync.NewAssociatedAccounts()
-			associatedAccounts.FetchExisting(db, walletId)
-
-			for _, tx := range txs {
-				err := associatedAccounts.ParseTx(tx.parsable, tx.serialized.Address)
-				assert.NoErr(err, "unable to parse associated accounts")
-			}
-
-			for _, tx := range txs {
-				events, err := walletsync.ParseTx(tx.parsable, tx.serialized.Address, associatedAccounts)
-				assert.NoErr(err, "unable to parse tx")
-
-				for _, event := range events {
-					eventSerialized, err := json.Marshal(event.Data)
-					assert.NoErr(err, "unable to serialize event", "event data", event)
-
-					fmt.Printf("event %s\n", eventSerialized)
-
-					insertableEvents = append(insertableEvents, &dbutils.InsertEventParams{
-						TransactionId: tx.serialized.Id,
-						IxIdx:         event.IxIdx,
-						Idx:           event.Idx,
-						Type:          event.Data.Type(),
-						Data:          string(eventSerialized),
-					})
-				}
-			}
-		}
-
-		if len(insertableEvents) > 0 && save {
-			err = dbutils.InsertEvents(db, insertableEvents)
-			assert.NoErr(err, "unable to insert events")
-			slog.Info("succesfully inserted ixs")
-		}
-	} else if replay {
-		offset := 0
-		replay := walletsync.NewReplay(db)
-
-		for {
-			events, err := dbutils.SelectEvents(db, offset*500)
-			assert.NoErr(err, "unable to select events")
-
-			for _, event := range events {
-				replay.ProcessEvent(event)
-			}
-
-			if len(events) < 500 {
-				break
-			}
-			offset += 1
-		}
-
-		fmt.Println()
-		fmt.Println(replay.AccountsString())
+		rpc := rpc.NewClientWithTimer(rpcUrl, 100*time.Millisecond)
+		fetchTransactions(db, rpc, walletAddress, signature)
+	case print:
+		slog.Info("Printing unknown instructions")
+		printUnknownInstructions(db)
+	case parseIxs:
+		slog.Info("Parsing isntructions")
+		parseInstructions(
+			db,
+			signature,
+			programAddress,
+			discriminator,
+			walletAddress,
+			ignorePrograms,
+			save,
+		)
+	case parseEvents:
 	}
 }

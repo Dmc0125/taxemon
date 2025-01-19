@@ -75,17 +75,17 @@ func newInsertableInstructionBase(
 		accountsAddresses[i] = txAddresses[idx]
 	}
 
-	var (
-		ixData []byte
-		err    error
-	)
-	if isInnerIx {
-		ixData, err = base58.Decode(ix.Data)
-	} else {
-		ixData, err = base64.StdEncoding.DecodeString(ix.Data)
-	}
-	if err != nil {
-		return nil, err
+	var ixData []byte
+	if len(ix.Data) > 0 {
+		var err error
+		if isInnerIx {
+			ixData, err = base58.Decode(ix.Data)
+		} else {
+			ixData, err = base64.StdEncoding.DecodeString(ix.Data)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	iix := insertableInstructionBase{
@@ -116,7 +116,7 @@ type insertableTransaction struct {
 	ixs []*insertableInstruction
 }
 
-func newInsertableTransaction(tx *rpc.ParsedTransactionResult) (*insertableTransaction, error) {
+func NewInsertableTransaction(tx *rpc.ParsedTransactionResult) (*insertableTransaction, error) {
 	itx := &insertableTransaction{
 		signature: tx.Transaction.Signatures[0],
 		timestamp: time.Unix(tx.BlockTime, 0),
@@ -279,7 +279,7 @@ type SavedTransaction struct {
 	Instructions []*SavedInstruction
 }
 
-func newParsableTxFromInsertable(tx *insertableTransaction) *SavedTransaction {
+func NewParsableTxFromInsertable(tx *insertableTransaction) *SavedTransaction {
 	ixs := make([]*SavedInstruction, len(tx.ixs))
 	for i, ix := range tx.ixs {
 		ixs[i] = &SavedInstruction{
@@ -466,11 +466,11 @@ func (f *Fetcher) fetchNext() (bool, []*insertableTransaction, []*dbutils.Select
 		}, 5)
 		assert.NoErr(err, "unable to get transaction")
 
-		insertableTx, err := newInsertableTransaction(tx)
+		insertableTx, err := NewInsertableTransaction(tx)
 		assert.NoErr(err, "unable to create insertable tx")
 
 		if !insertableTx.err {
-			parsableTx := newParsableTxFromInsertable(insertableTx)
+			parsableTx := NewParsableTxFromInsertable(insertableTx)
 			err = f.associatedAccounts.ParseTx(parsableTx, f.address)
 			assert.NoErr(err, "unable to parse associated accounts")
 		}
@@ -511,8 +511,10 @@ func insertAssociatedAccounts(tx *sqlx.Tx, associatedAccounts *AssociatedAccount
 		}
 	}
 
-	err := dbutils.InsertAssociatedAccounts(tx, insertableAssociatedAccounts)
-	assert.NoErr(err, "unable to insert associated accounts")
+	for a := range slices.Chunk(insertableAssociatedAccounts, 100) {
+		err := dbutils.InsertAssociatedAccounts(tx, a)
+		assert.NoErr(err, "unable to insert associated accounts")
+	}
 }
 
 func fetchTransactionsForAddress(
@@ -533,9 +535,12 @@ func fetchTransactionsForAddress(
 		}
 
 		var insertedTxs []*dbutils.InsertTransactionsRow
-		if len(insertableTransactions) > 0 {
-			slog.Info("inserting transactions")
-			insertedTxs = insertTransactions(db, insertableTransactions)
+
+		if len(insertableTransactions) > 100 {
+			for txs := range slices.Chunk(insertableTransactions, 100) {
+				slog.Info("inserting transactions")
+				insertedTxs = insertTransactions(db, txs)
+			}
 		}
 
 		tx, err := db.Beginx()
@@ -550,8 +555,10 @@ func fetchTransactionsForAddress(
 			for _, tx := range savedTransactions {
 				transactionsIds = append(transactionsIds, tx.Id)
 			}
-			err = dbutils.InsertTransactionsToWallet(tx, walletId, transactionsIds)
-			assert.NoErr(err, "unable to insert transactions_to_wallet")
+			for tids := range slices.Chunk(transactionsIds, 100) {
+				err = dbutils.InsertTransactionsToWallet(tx, walletId, tids)
+				assert.NoErr(err, "unable to insert transactions_to_wallet")
+			}
 		}
 
 		if fetcher.latestSignature != "" {
@@ -573,7 +580,7 @@ func fetchTransactionsForAddress(
 	}
 }
 
-func syncWallet(
+func SyncWallet(
 	rpcClient *rpc.Client,
 	db *sqlx.DB,
 	walletId int32,
@@ -625,7 +632,7 @@ func syncWallet(
 		for _, tx := range transactions {
 			dtx := NewParsableTxFromDb(tx.SelectTransactionsRow)
 
-			events, err := ParseTx(dtx, walletAddress, associatedAccounts)
+			events, err := ParseTxIntoEvents(dtx, walletAddress, associatedAccounts)
 			assert.NoErr(err, "unable to parse tx")
 
 			for _, event := range events {
@@ -679,7 +686,7 @@ outer:
 			}
 			assert.NoErr(err, "unable to get latest sync request")
 
-			syncWallet(rpcClient, db, syncRequest.WalletId, syncRequest.Address, syncRequest.LastSignature.String)
+			SyncWallet(rpcClient, db, syncRequest.WalletId, syncRequest.Address, syncRequest.LastSignature.String)
 			slog.Info("wallet syncing finished", "address", syncRequest.Address)
 		}
 	}

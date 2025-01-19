@@ -401,8 +401,9 @@ func SelectEvents(db DBTX, offset int) ([]*SelectEventsRow, error) {
 }
 
 type SelectWalletsRow struct {
-	Id      int32
-	Address string
+	Id            int32
+	Address       string
+	LastSignature sql.NullString `db:"last_signature"`
 }
 
 func SelectWallets(db DBTX) ([]*SelectWalletsRow, error) {
@@ -410,7 +411,8 @@ func SelectWallets(db DBTX) ([]*SelectWalletsRow, error) {
 	q := `
 		select
 			address,
-			id
+			id,
+			last_signature
 		from
 			wallet
 	`

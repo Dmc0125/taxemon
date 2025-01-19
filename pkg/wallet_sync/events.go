@@ -740,7 +740,7 @@ func parseJupLimitIx(ctx *parseIxContext) ([]EventData, error) {
 }
 
 var (
-	ixMerkleDistributorClaim, _  = hex.DecodeString("4eb1627bd215bb53")
+	IxMerkleDistributorClaim, _  = hex.DecodeString("4eb1627bd215bb53")
 	IxMerkleCloseClaimAccount, _ = hex.DecodeString("a3d6bfa5f5bc11b9")
 )
 
@@ -756,7 +756,7 @@ func parseMerkleDistributorIx(ctx *parseIxContext) ([]EventData, error) {
 	}
 	disc := ix.Data[:8]
 
-	if slices.Equal(disc, ixMerkleDistributorClaim) {
+	if slices.Equal(disc, IxMerkleDistributorClaim) {
 		claimaint := ix.Accounts[4]
 
 		if claimaint == ctx.walletAddress {
@@ -1003,7 +1003,7 @@ type ParsedEvent struct {
 	Data  EventData
 }
 
-func ParseTx(
+func ParseTxIntoEvents(
 	tx *SavedTransaction,
 	walletAddress string,
 	associatedAccounts *AssociatedAccounts,
